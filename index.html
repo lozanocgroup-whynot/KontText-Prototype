@@ -142,12 +142,6 @@ Use clear, direct language and lead with the most important point. Keep the regi
 
 The goal for this task is [goal]. The audience is [audience]. Write as if the user is speaking directly to them.`;
 
-const RECENTS = [
-  { title: "LinkedIn thought leadership post", cat: "Marketing", date: "2 days ago" },
-  { title: "Client email follow-up", cat: "Client Emails", date: "4 days ago" },
-  { title: "Brand voice guide intro", cat: "Marketing", date: "1 week ago" },
-];
-
 const Q_PERSONAL = [
   { q: "How would you describe your communication style?", type: "text", ph: "e.g. direct, warm, detailed, casual" },
   { q: "What topics or industries do you work in?", type: "text", ph: "e.g. SaaS, coaching, design" },
@@ -204,7 +198,7 @@ const AI = {
    blank to instead enter it in Settings (saved only in your own browser). */
 
 const SUPABASE_URL_DEFAULT = "https://vccirheyjtrwesxdoguv.supabase.co"; // your Project URL
-const SUPABASE_KEY_DEFAULT = ""; // paste your sb_publishable_... key here for the hosted site
+const SUPABASE_KEY_DEFAULT = "sb_publishable_rCuzeZ3KNjG39V7sGbUPLA_HVoGntHR"; // public key — safe to ship
 
 const LS_SB = "kontext_supabase_cfg";
 function loadCfg() {
@@ -214,7 +208,6 @@ function loadCfg() {
   if (SUPABASE_URL_DEFAULT && SUPABASE_KEY_DEFAULT) return { url: SUPABASE_URL_DEFAULT, key: SUPABASE_KEY_DEFAULT };
   return saved;
 }
-function saveCfg(c) { try { c ? localStorage.setItem(LS_SB, JSON.stringify(c)) : localStorage.removeItem(LS_SB); } catch (e) {} }
 function makeClient(cfg) {
   if (!cfg || !cfg.url || !cfg.key) return null;
   if (typeof supabase === "undefined" || !supabase.createClient) return null;
@@ -312,20 +305,13 @@ function App() {
   // The user's living memory: name/email from signup + onboarding answers. Empty until they sign up.
   const [profile, setProfile] = useState({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
 
-  // vault state shared between Vaults + create flow
-  const [categories, setCategories] = useState(["Marketing", "Client Emails", "Social Media", "Internal Comms"]);
-  const [folders, setFolders] = useState({
-    "Marketing": [
-      { name: "LinkedIn thought leadership post", date: "2 days ago", text: MOCK_PROMPT },
-      { name: "Brand voice guide intro", date: "1 week ago", text: MOCK_PROMPT },
-    ],
-    "Client Emails": [{ name: "Client email follow-up", date: "4 days ago", text: MOCK_PROMPT }],
-    "Social Media": [],
-    "Internal Comms": [],
-  });
+  // vault state shared between Vaults + create flow — empty until the user creates their own
+  const [categories, setCategories] = useState([]);
+  const [folders, setFolders] = useState({});
 
   // --- Cloud sync (Supabase) ---
-  const [sbCfg, setSbCfg] = useState(loadCfg());
+  // The Supabase connection is baked in (see SUPABASE_*_DEFAULT above) and connects
+  // automatically on load. Customers never configure it.
   const sbRef = useRef(makeClient(loadCfg()));
   const sb = sbRef.current;
   const [user, setUser] = useState(null);
@@ -335,12 +321,13 @@ function App() {
 
   const go = (s) => { setScreen(s); window.scrollTo(0, 0); };
 
-  const configureCloud = (cfg) => { saveCfg(cfg); setSbCfg(cfg); sbRef.current = makeClient(cfg); };
+  const hasProfile = (blob) => !!(blob && blob.profile && blob.profile.answers && Object.keys(blob.profile.answers).length > 0);
 
   const hydrate = async (u) => {
     hydrating.current = true;
+    let blob = null;
     try {
-      const blob = await loadState(sb, u.id);
+      blob = await loadState(sb, u.id);
       if (blob) {
         if (blob.accountType) setAccountType(blob.accountType);
         if (blob.profile) setProfile(blob.profile);
@@ -349,14 +336,15 @@ function App() {
       }
     } catch (e) { setCloudMsg("Couldn't load your saved data: " + e.message); }
     setTimeout(() => { hydrating.current = false; }, 0);
+    return blob;
   };
 
-  // Restore an existing session on load.
+  // Restore an existing session on load — finished profiles go Home, unfinished go to onboarding.
   useEffect(() => {
     if (!sb) return;
     sb.auth.getSession().then(async ({ data }) => {
       const u = data && data.session ? data.session.user : null;
-      if (u) { setUser(u); await hydrate(u); go("home"); }
+      if (u) { setUser(u); const blob = await hydrate(u); go(hasProfile(blob) ? "home" : "wizard"); }
     });
   }, []);
 
@@ -370,7 +358,7 @@ function App() {
   }, [accountType, profile, categories, folders, user]);
 
   const auth = {
-    sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
+    sb, user, cloudMsg, setCloudMsg,
     signUp: async (email, password, name) => {
       if (!sb) return { ok: true, local: true };
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
@@ -382,7 +370,7 @@ function App() {
       if (!sb) return { ok: true, local: true };
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return { ok: false, error: error.message };
-      setUser(data.user); await hydrate(data.user); return { ok: true };
+      setUser(data.user); const blob = await hydrate(data.user); return { ok: true, hasProfile: hasProfile(blob) };
     },
     signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); },
   };
@@ -445,11 +433,11 @@ function Landing({ go }) {
         </p>
         <div className="mt-8 flex justify-center gap-3">
           <Btn onClick={() => go("signup")} className="px-6 py-3">Get Started</Btn>
-          <Btn variant="secondary" onClick={() => go("login")} className="px-6 py-3">Learn More</Btn>
+          <Btn variant="secondary" onClick={() => { const el = document.getElementById("how"); if (el) el.scrollIntoView({ behavior: "smooth" }); }} className="px-6 py-3">Learn More</Btn>
         </div>
       </section>
 
-      <section className="mx-auto max-w-5xl px-6 pb-16">
+      <section id="how" className="mx-auto max-w-5xl px-6 pb-16 scroll-mt-6">
         <div className="text-center label text-muted mb-6">How it works</div>
         <div className="flex flex-col sm:flex-row gap-4">
           <Step n="1" title="Build your identity" body="A short adaptive onboarding wizard learns your voice, style, and goals." />
@@ -562,7 +550,7 @@ function Login({ go, auth }) {
       const r = await auth.signIn(email.trim(), password);
       setBusy(false);
       if (!r.ok) { setErr(r.error || "Couldn't log in."); return; }
-      go("home");
+      go(r.hasProfile ? "home" : "wizard");
       return;
     }
     go("home");
@@ -804,8 +792,16 @@ function PageHead({ title, sub, right }) {
 
 /* ----------------------------- 6. Home ----------------------------- */
 
-function Home({ go }) {
+function Home({ go, folders }) {
   const [tut, setTut] = useState(true);
+  const [copiedKey, setCopiedKey] = useState(null);
+
+  // real recents: every saved prompt across folders, newest first
+  const recents = [];
+  Object.keys(folders || {}).forEach((cat) => (folders[cat] || []).forEach((p, i) => recents.push({ ...p, cat, key: cat + "-" + i })));
+  recents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const recent = recents.slice(0, 5);
+
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       {tut && (
@@ -835,17 +831,24 @@ function Home({ go }) {
       </Card>
 
       <h3 className="text-sm font-medium mb-3">Recent prompts</h3>
-      <div className="space-y-3">
-        {RECENTS.map((r) => (
-          <Card key={r.title} className="p-4 flex items-center justify-between hover:border-brand/40 transition-colors">
-            <div>
-              <div className="text-sm font-medium">{r.title}</div>
-              <div className="text-xs text-muted mt-0.5">{r.cat} · {r.date}</div>
-            </div>
-            <button className="text-muted hover:text-brand p-2" title="Copy"><Icon d={icons.copy} /></button>
-          </Card>
-        ))}
-      </div>
+      {recent.length === 0 ? (
+        <Card className="p-6 text-sm text-muted text-center">No prompts yet — create your first one above.</Card>
+      ) : (
+        <div className="space-y-3">
+          {recent.map((r) => (
+            <Card key={r.key} className="p-4 flex items-center justify-between hover:border-brand/40 transition-colors">
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{r.name}</div>
+                <div className="text-xs text-muted mt-0.5">{r.cat} · {r.date}</div>
+              </div>
+              <button className="text-muted hover:text-brand p-2 shrink-0" title="Copy"
+                onClick={() => { try { navigator.clipboard && navigator.clipboard.writeText(r.text); } catch (e) {} setCopiedKey(r.key); setTimeout(() => setCopiedKey(null), 1200); }}>
+                <Icon d={copiedKey === r.key ? icons.check : icons.copy} />
+              </button>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -941,7 +944,7 @@ function Create({ go, categories, setCategories, folders, setFolders, auth, prof
             categories={categories} setCategories={setCategories}
             onClose={() => setShowSave(false)}
             onSave={(name, cat) => {
-              setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", text: promptText }, ...(f[cat] || [])] }));
+              setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", ts: Date.now(), text: promptText }, ...(f[cat] || [])] }));
               setShowSave(false);
               go("vaults");
             }}
@@ -1043,11 +1046,12 @@ function SaveModal({ categories, setCategories, onClose, onSave }) {
 
 /* ----------------------------- 8. Vaults ----------------------------- */
 
-function Vaults({ categories, setCategories, folders, setFolders }) {
+function Vaults({ go, categories, setCategories, folders, setFolders }) {
   const [open, setOpen] = useState(null); // folder name
   const [query, setQuery] = useState("");
   const [newTag, setNewTag] = useState("");
   const [dupe, setDupe] = useState(false);
+  const tagInputRef = useRef(null);
 
   const addTag = () => {
     const v = newTag.trim();
@@ -1064,13 +1068,13 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
     if (open === t) setOpen(null);
   };
 
-  if (open) return <FolderView name={open} folders={folders} setFolders={setFolders} onBack={() => setOpen(null)} />;
+  if (open) return <FolderView name={open} go={go} folders={folders} setFolders={setFolders} onBack={() => setOpen(null)} />;
 
   const folderNames = categories.filter((c) => !query || c.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
-      <PageHead title="My Vaults" right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Folder</Btn>} />
+      <PageHead title="My Vaults" right={<Btn onClick={() => tagInputRef.current && tagInputRef.current.focus()}><Icon d={icons.plus} className="h-4 w-4" /> New Folder</Btn>} />
 
       <div className="relative mb-6">
         <Icon d={icons.search} className="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -1095,6 +1099,7 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
         )}
         <div className="flex gap-2">
           <input
+            ref={tagInputRef}
             value={newTag}
             maxLength={32}
             onChange={(e) => { setNewTag(e.target.value); setDupe(false); }}
@@ -1124,22 +1129,35 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
   );
 }
 
-function FolderView({ name, folders, setFolders, onBack }) {
+function FolderView({ name, go, folders, setFolders, onBack }) {
   const items = folders[name] || [];
   const [editIdx, setEditIdx] = useState(null);
   const [draft, setDraft] = useState("");
   const [confirmIdx, setConfirmIdx] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
+  const [note, setNote] = useState("");
 
   const update = (idx, text) => setFolders((f) => ({ ...f, [name]: f[name].map((p, i) => i === idx ? { ...p, text } : p) }));
   const remove = (idx) => setFolders((f) => ({ ...f, [name]: f[name].filter((_, i) => i !== idx) }));
+  const copyText = (t) => { try { navigator.clipboard && navigator.clipboard.writeText(t); } catch (e) {} };
+  const flash = (msg) => { setNote(msg); setTimeout(() => setNote(""), 1500); };
+  const exportTxt = (p) => {
+    try {
+      const blob = new Blob([p.text], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = (p.name || "prompt").replace(/[^a-z0-9]+/gi, "-").toLowerCase() + ".txt";
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch (e) { flash("Couldn't export"); }
+  };
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       <button className="flex items-center gap-1 text-sm text-muted hover:text-ink mb-4" onClick={onBack}>
         <Icon d={icons.back} className="h-4 w-4" /> My Vaults
       </button>
-      <PageHead title={name} right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Prompt</Btn>} />
+      <PageHead title={name} right={<Btn onClick={() => go("create")}><Icon d={icons.plus} className="h-4 w-4" /> New Prompt</Btn>} />
+      {note && <p className="mb-3 text-xs text-ok">{note}</p>}
 
       {items.length === 0 ? (
         <Card className="p-10 text-center text-muted">No prompts in this folder yet.</Card>
@@ -1155,9 +1173,9 @@ function FolderView({ name, folders, setFolders, onBack }) {
                 </div>
                 <div className="flex items-center gap-1 shrink-0 text-muted">
                   <button title="Edit" className="p-1.5 hover:text-brand" onClick={() => { setEditIdx(idx); setDraft(p.text); }}><Icon d={icons.edit} className="h-4 w-4" /></button>
-                  <button title="Copy" className="p-1.5 hover:text-brand" onClick={() => { setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 1200); }}><Icon d={copiedIdx === idx ? icons.check : icons.copy} className="h-4 w-4" /></button>
-                  <button title="Share" className="p-1.5 hover:text-brand"><Icon d={icons.share} className="h-4 w-4" /></button>
-                  <button title="Export" className="p-1.5 hover:text-brand"><Icon d={icons.download} className="h-4 w-4" /></button>
+                  <button title="Copy" className="p-1.5 hover:text-brand" onClick={() => { copyText(p.text); setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 1200); }}><Icon d={copiedIdx === idx ? icons.check : icons.copy} className="h-4 w-4" /></button>
+                  <button title="Copy to share" className="p-1.5 hover:text-brand" onClick={() => { copyText(p.text); flash("Copied — paste anywhere to share"); }}><Icon d={icons.share} className="h-4 w-4" /></button>
+                  <button title="Export as .txt" className="p-1.5 hover:text-brand" onClick={() => exportTxt(p)}><Icon d={icons.download} className="h-4 w-4" /></button>
                   <button title="Delete" className="p-1.5 hover:text-danger" onClick={() => setConfirmIdx(idx)}><Icon d={icons.trash} className="h-4 w-4" /></button>
                 </div>
               </div>
@@ -1202,6 +1220,14 @@ function Profile({ accountType, profile, setProfile }) {
   const filled = fields.filter((f) => f.value !== "—");
   const traits = filled.slice(0, 3);
 
+  // edit the name + email on the identity card
+  const [editId, setEditId] = useState(false);
+  const [nameDraft, setNameDraft] = useState(profile.name || "");
+  const [emailDraft, setEmailDraft] = useState(profile.email || "");
+  const openId = () => { setNameDraft(profile.name || ""); setEmailDraft(profile.email || ""); setEditId(true); };
+  const saveId = () => { setProfile((p) => ({ ...p, name: nameDraft.trim(), email: emailDraft.trim() })); setEditId(false); };
+
+  // edit each onboarding answer
   const [editIdx, setEditIdx] = useState(null);
   const [draft, setDraft] = useState("");
   const saveField = (i) => {
@@ -1212,15 +1238,34 @@ function Profile({ accountType, profile, setProfile }) {
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       <Card className="p-7 mb-8">
-        <div className="flex items-center gap-4">
-          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand">{initials(profile.name)}</div>
-          <div className="min-w-0">
-            <div className="text-lg font-medium">{profile.name || "—"}</div>
-            <div className="text-sm text-muted">{profile.email || "—"}</div>
-            <div className="mt-2"><Badge>{accountType}</Badge></div>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand shrink-0">{initials(profile.name)}</div>
+            {editId ? (
+              <div className="fade w-full">
+                <Field label="Name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} />
+                <div className="mt-2"><Field label="Email" value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} /></div>
+              </div>
+            ) : (
+              <div className="min-w-0">
+                <div className="text-lg font-medium truncate">{profile.name || "—"}</div>
+                <div className="text-sm text-muted truncate">{profile.email || "—"}</div>
+                <div className="mt-2"><Badge>{accountType}</Badge></div>
+              </div>
+            )}
           </div>
+          {editId ? (
+            <div className="flex gap-2 shrink-0">
+              <Btn onClick={saveId}>Save</Btn>
+              <Btn variant="ghost" onClick={() => setEditId(false)}>Cancel</Btn>
+            </div>
+          ) : (
+            <Btn variant="secondary" className="shrink-0" onClick={openId}>
+              <Icon d={icons.edit} className="h-4 w-4" /> Edit
+            </Btn>
+          )}
         </div>
-        {traits.length > 0 && (
+        {traits.length > 0 && !editId && (
           <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-line pt-5">
             {traits.map((t) => (
               <div key={t.key}>
@@ -1240,9 +1285,16 @@ function Profile({ accountType, profile, setProfile }) {
         <div className="space-y-3">
           {fields.map((f, i) => (
             <Card key={i} className="p-4">
-              <div className="label text-muted mb-1.5">{f.label}</div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="label text-muted">{f.label}</div>
+                {editIdx !== i && (
+                  <button className="text-muted hover:text-brand p-1 shrink-0" title="Edit" onClick={() => { setEditIdx(i); setDraft(f.value === "—" ? "" : f.value); }}>
+                    <Icon d={icons.edit} className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
               {editIdx === i ? (
-                <div className="fade">
+                <div className="fade mt-1.5">
                   <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
                   <div className="mt-2 flex gap-2">
                     <Btn onClick={() => saveField(i)}>Save</Btn>
@@ -1250,9 +1302,7 @@ function Profile({ accountType, profile, setProfile }) {
                   </div>
                 </div>
               ) : (
-                <button className="text-left w-full text-sm hover:text-brand" onClick={() => { setEditIdx(i); setDraft(f.value === "—" ? "" : f.value); }}>
-                  {f.value}
-                </button>
+                <div className="text-sm mt-1.5">{f.value}</div>
               )}
             </Card>
           ))}
@@ -1264,39 +1314,35 @@ function Profile({ accountType, profile, setProfile }) {
 
 /* ----------------------------- 10. Settings ----------------------------- */
 
-function CloudEditor({ auth }) {
-  const cfg = auth.sbCfg || {};
-  const [url, setUrl] = useState(cfg.url || "");
-  const [key, setKey] = useState(cfg.key || "");
-  const [msg, setMsg] = useState("");
-  const [bad, setBad] = useState(false);
-
-  const testAI = async () => {
-    setBad(false); setMsg("Testing the AI server…");
-    try {
-      const r = await callClaude(auth.sb, { system: "Reply with the single word: ok", user: "ok", model: AI.model_fast, max_tokens: 5 });
-      setMsg("AI server is working. Reply: " + r);
-    } catch (e) { setBad(true); setMsg("AI test failed: " + e.message); }
-  };
-
-  return (
-    <div>
-      <Field label="Supabase project URL" placeholder="https://xxxx.supabase.co" value={url} onChange={(e) => setUrl(e.target.value)} />
-      <div className="mt-3"><Field label="Supabase publishable (anon) key" type="password" placeholder="sb_publishable_..." value={key} onChange={(e) => setKey(e.target.value)} /></div>
-      <div className="mt-3 flex items-center gap-4 flex-wrap">
-        <Btn variant="secondary" disabled={!url.trim() || !key.trim()} onClick={() => { setBad(false); auth.configureCloud({ url: url.trim(), key: key.trim() }); setMsg("Saved. Reload the page to connect, then sign up or log in."); }}>Save</Btn>
-        {auth.sb && <Btn variant="ghost" onClick={testAI}>Test AI server</Btn>}
-        {auth.sbCfg && <button className="text-xs text-danger" onClick={() => { auth.configureCloud(null); setUrl(""); setKey(""); setMsg("Disconnected. Reload the page."); }}>Disconnect</button>}
-      </div>
-      {msg && <p className={`mt-2 text-xs ${bad ? "text-danger" : "text-ok"}`}>{msg}</p>}
-    </div>
-  );
-}
-
 function Settings({ go, profile, auth }) {
   const [emailNotif, setEmailNotif] = useState(true);
   const [weekly, setWeekly] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+
+  const cloud = !!(auth && auth.sb && auth.user);
+  const [email, setEmail] = useState(profile.email || "");
+  const [pw, setPw] = useState("");
+  const [acctMsg, setAcctMsg] = useState("");
+  const [acctBad, setAcctBad] = useState(false);
+  const say = (msg, bad) => { setAcctMsg(msg); setAcctBad(!!bad); };
+
+  const saveEmail = async () => {
+    if (!cloud) { say("Connect an account first.", true); return; }
+    const { error } = await auth.sb.auth.updateUser({ email: email.trim() });
+    error ? say(error.message, true) : say("Check your new email to confirm the change.");
+  };
+  const savePassword = async () => {
+    if (!cloud) { say("Connect an account first.", true); return; }
+    if (pw.length < 6) { say("Password must be at least 6 characters.", true); return; }
+    const { error } = await auth.sb.auth.updateUser({ password: pw });
+    if (error) { say(error.message, true); } else { setPw(""); say("Password updated."); }
+  };
+  const deleteAccount = async () => {
+    // Clears your saved profile + vault from the cloud and signs you out.
+    if (cloud) { try { await saveState(auth.sb, auth.user.id, {}); } catch (e) {} }
+    await auth.signOut();
+    go("landing");
+  };
 
   const Toggle = ({ on, onClick, label }) => (
     <div className="flex items-center justify-between py-2">
@@ -1311,33 +1357,20 @@ function Settings({ go, profile, auth }) {
     <div className="mx-auto max-w-2xl px-6 py-8">
       <PageHead title="Settings" />
 
-      <Card className="p-6 mb-5">
-        <div className="label text-muted mb-3">Cloud sync</div>
-        <div className="flex items-center gap-2 mb-3">
-          <span className={`h-2 w-2 rounded-full ${auth.user ? "bg-ok" : auth.sbCfg ? "bg-brand" : "bg-line"}`} />
-          <span className="text-sm font-medium">
-            {auth.user ? `Signed in as ${auth.user.email}` : auth.sbCfg ? "Connected — sign up or log in to save" : "Not connected"}
-          </span>
-        </div>
-        <p className="text-sm text-muted mb-4 leading-relaxed">
-          Connect a free Supabase project so your profile and vault are saved to a real account and follow you across devices.
-          Use the <strong>anon (public)</strong> key — never the secret key. Setup steps are in SUPABASE-SETUP.md.
-        </p>
-        <CloudEditor auth={auth} />
-        {auth.cloudMsg && <p className="mt-2 text-xs text-danger">{auth.cloudMsg}</p>}
-      </Card>
+      {auth.cloudMsg && <p className="mb-4 text-xs text-danger">{auth.cloudMsg}</p>}
 
       <Card className="p-6 mb-5">
         <div className="label text-muted mb-4">Account</div>
         <div className="space-y-4">
           <div className="flex gap-2 items-end">
-            <div className="flex-1"><Field label="Change email" defaultValue={profile.email || ""} placeholder="you@example.com" /></div>
-            <Btn variant="secondary">Save</Btn>
+            <div className="flex-1"><Field label="Change email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></div>
+            <Btn variant="secondary" onClick={saveEmail}>Save</Btn>
           </div>
           <div className="flex gap-2 items-end">
-            <div className="flex-1"><Field label="Change password" type="password" placeholder="New password" /></div>
-            <Btn variant="secondary">Save</Btn>
+            <div className="flex-1"><Field label="Change password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="New password" /></div>
+            <Btn variant="secondary" onClick={savePassword}>Save</Btn>
           </div>
+          {acctMsg && <p className={`text-xs ${acctBad ? "text-danger" : "text-ok"}`}>{acctMsg}</p>}
         </div>
       </Card>
 
@@ -1361,12 +1394,12 @@ function Settings({ go, profile, auth }) {
       <Card className="p-6 mb-5 border-danger/40">
         <div className="label text-danger mb-3">Danger zone</div>
         {!confirmDel ? (
-          <Btn variant="danger" onClick={() => setConfirmDel(true)}>Delete account</Btn>
+          <Btn variant="danger" onClick={() => setConfirmDel(true)}>Delete my data</Btn>
         ) : (
           <div className="fade">
-            <div className="text-sm mb-3">This permanently deletes your account and all vaults. This cannot be undone.</div>
+            <div className="text-sm mb-3">This erases your saved profile and vaults and signs you out. This cannot be undone.</div>
             <div className="flex gap-2">
-              <Btn variant="danger" onClick={() => setConfirmDel(false)}>Yes, delete</Btn>
+              <Btn variant="danger" onClick={deleteAccount}>Yes, delete</Btn>
               <Btn variant="ghost" onClick={() => setConfirmDel(false)}>Cancel</Btn>
             </div>
           </div>
