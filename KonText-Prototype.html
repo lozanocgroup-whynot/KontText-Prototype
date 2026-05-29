@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script>
@@ -141,12 +142,6 @@ Use clear, direct language and lead with the most important point. Keep the regi
 
 The goal for this task is [goal]. The audience is [audience]. Write as if the user is speaking directly to them.`;
 
-const RECENTS = [
-  { title: "LinkedIn thought leadership post", cat: "Marketing", date: "2 days ago" },
-  { title: "Client email follow-up", cat: "Client Emails", date: "4 days ago" },
-  { title: "Brand voice guide intro", cat: "Marketing", date: "1 week ago" },
-];
-
 const Q_PERSONAL = [
   { q: "How would you describe your communication style?", type: "text", ph: "e.g. direct, warm, detailed, casual" },
   { q: "What topics or industries do you work in?", type: "text", ph: "e.g. SaaS, coaching, design" },
@@ -183,27 +178,70 @@ const CREATE_FLOW = [
     b: "What do you want them to feel or do after reading this?" },
 ];
 
-/* ----------------------------- AI: config, profile, calls ----------------------------- */
-/* Prototype-only: the Claude API key is read from THIS browser's local storage.
-   In the real build (V2) the key lives on the server (Supabase Edge Functions),
-   never inside the app. Don't share this file with your key saved in it. */
+/* ----------------------------- AI: config ----------------------------- */
+/* The Claude key is NOT here and never in the browser. It lives on your Supabase
+   server (the `claude` Edge Function). The app just asks that function, which talks
+   to Claude. Users never see or enter a key. */
 
 const AI = {
-  endpoint: "https://api.anthropic.com/v1/messages",
-  version: "2023-06-01",
   model_fast: "claude-haiku-4-5-20251001", // quick: adaptive follow-up questions
   model_smart: "claude-sonnet-4-6",        // higher quality: the master prompt
 };
-const LS_KEY = "kontext_claude_key";
 
-function loadKey() { try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; } }
-function saveKey(k) { try { k ? localStorage.setItem(LS_KEY, k) : localStorage.removeItem(LS_KEY); } catch (e) {} }
+/* ----------------------------- Cloud sync (Supabase) ----------------------------- */
+/* The Supabase URL + publishable (anon) key are PUBLIC by design — safe to ship in the
+   browser and in GitHub. Row Level Security makes sure each person only sees their own
+   data. One table `kontext_state` holds one jsonb blob per user — the persisted memory.
+
+   FOR THE LIVE/HOSTED SITE: paste your two PUBLIC values on the next two lines. Once both
+   are filled the app connects automatically — no Settings step for visitors. Leave the key
+   blank to instead enter it in Settings (saved only in your own browser). */
+
+const SUPABASE_URL_DEFAULT = "https://vccirheyjtrwesxdoguv.supabase.co"; // your Project URL
+const SUPABASE_KEY_DEFAULT = "sb_publishable_rCuzeZ3KNjG39V7sGbUPLA_HVoGntHR"; // public key — safe to ship
+
+const LS_SB = "kontext_supabase_cfg";
+function loadCfg() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LS_SB) || "null"); } catch (e) {}
+  if (saved && saved.url && saved.key) return saved;
+  if (SUPABASE_URL_DEFAULT && SUPABASE_KEY_DEFAULT) return { url: SUPABASE_URL_DEFAULT, key: SUPABASE_KEY_DEFAULT };
+  return saved;
+}
+function saveCfg(c) { try { c ? localStorage.setItem(LS_SB, JSON.stringify(c)) : localStorage.removeItem(LS_SB); } catch (e) {} }
+function makeClient(cfg) {
+  if (!cfg || !cfg.url || !cfg.key) return null;
+  if (typeof supabase === "undefined" || !supabase.createClient) return null;
+  try { return supabase.createClient(cfg.url, cfg.key); } catch (e) { return null; }
+}
+async function loadState(sb, userId) {
+  const { data, error } = await sb.from("kontext_state").select("data").eq("user_id", userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? data.data : null;
+}
+async function saveState(sb, userId, blob) {
+  const { error } = await sb.from("kontext_state").upsert({ user_id: userId, data: blob, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
+}
 
 // Initials for the avatar, from the user's real name.
 function initials(name) {
   const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return "·";
   return (parts[0][0] + (parts[1] ? parts[1][0] : "")).toUpperCase();
+}
+
+// Friendly "when" label for a saved prompt's timestamp.
+function whenLabel(ts) {
+  if (!ts) return "";
+  const diff = Date.now() - ts;
+  const min = 60000, hr = 3600000, day = 86400000;
+  if (diff < min) return "just now";
+  if (diff < hr) return Math.floor(diff / min) + "m ago";
+  if (diff < day) return Math.floor(diff / hr) + "h ago";
+  if (diff < 7 * day) return Math.floor(diff / day) + "d ago";
+  try { return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); }
+  catch (e) { return new Date(ts).toLocaleDateString(); }
 }
 
 // Turn the user's REAL profile (account type + onboarding answers) into text for the AI.
@@ -233,31 +271,19 @@ function profileToText(profile, accountType) {
     : `${header}\n(No profile answers captured yet — keep the output general.)`;
 }
 
-// One small wrapper around the Claude API (browser-direct — prototype only).
-async function callClaude(apiKey, { system, user, model, max_tokens = 1024 }) {
-  const res = await fetch(AI.endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": AI.version,
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({ model, max_tokens, system, messages: [{ role: "user", content: user }] }),
-  });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
-    throw new Error(detail || `Request failed (${res.status})`);
-  }
-  const data = await res.json();
-  return ((data.content && data.content[0] && data.content[0].text) || "").trim();
+// Ask Claude through your Supabase Edge Function (the key stays on the server).
+async function callClaude(sb, { system, user, model, max_tokens = 1024 }) {
+  if (!sb) throw new Error("Not connected to your KonText server yet.");
+  const { data, error } = await sb.functions.invoke("claude", { body: { system, user, model, max_tokens } });
+  if (error) throw new Error(error.message || "AI request failed");
+  if (data && data.error) throw new Error(data.error);
+  return ((data && data.text) || "").trim();
 }
 
 // Generate adaptive onboarding follow-ups from the user's first-round answers.
-async function genOnboarding(apiKey, layer1Str) {
+async function genOnboarding(sb, layer1Str) {
   const system = "You are KonText, building a person's identity profile. Given their first-round answers, write 5 short, specific follow-up questions that go deeper into their voice, style, goals, and how they want AI to represent them. Each question is one sentence, written directly to them. Return ONLY a JSON array of strings — no other text, no markdown.";
-  const raw = await callClaude(apiKey, { system, user: layer1Str, model: AI.model_fast, max_tokens: 500 });
+  const raw = await callClaude(sb, { system, user: layer1Str, model: AI.model_fast, max_tokens: 500 });
   let arr;
   try { arr = JSON.parse(raw); }
   catch (e) { const m = raw.match(/\[[\s\S]*\]/); arr = m ? JSON.parse(m[0]) : null; }
@@ -266,10 +292,10 @@ async function genOnboarding(apiKey, layer1Str) {
 }
 
 // Generate exactly two adaptive follow-up questions for one core project question.
-async function genFollowups(apiKey, profileStr, coreQ, answer) {
+async function genFollowups(sb, profileStr, coreQ, answer) {
   const system = "You are KonText, an engine that personalizes AI for a specific person. Given their identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper so the final output is sharper. Each question is one sentence. Return ONLY a JSON array of two strings — no other text, no markdown.";
   const user = `${profileStr}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
-  const raw = await callClaude(apiKey, { system, user, model: AI.model_fast, max_tokens: 300 });
+  const raw = await callClaude(sb, { system, user, model: AI.model_fast, max_tokens: 300 });
   let arr;
   try { arr = JSON.parse(raw); }
   catch (e) { const m = raw.match(/\[[\s\S]*\]/); arr = m ? JSON.parse(m[0]) : null; }
@@ -278,11 +304,11 @@ async function genFollowups(apiKey, profileStr, coreQ, answer) {
 }
 
 // Build the final master prompt from the profile + all project answers.
-async function genMasterPrompt(apiKey, profileStr, qa) {
+async function genMasterPrompt(sb, profileStr, qa) {
   const system = "You are KonText. Turn a person's identity profile plus their project answers into a single clean 'master prompt' they can paste into ChatGPT, Claude, or Gemini. Write it as direct instructions to an AI in second person (e.g. \"You are acting as...\"). Capture their voice, style, and goals, then the specific project, goal, and audience. Output ONLY the master prompt — no preamble, no explanation, no markdown headings. Keep it tight: 2 to 4 short paragraphs.";
   const body = qa.map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n");
   const user = `${profileStr}\n\nProject answers:\n${body}`;
-  return callClaude(apiKey, { system, user, model: AI.model_smart, max_tokens: 700 });
+  return callClaude(sb, { system, user, model: AI.model_smart, max_tokens: 700 });
 }
 
 /* ============================================================ APP */
@@ -290,26 +316,90 @@ async function genMasterPrompt(apiKey, profileStr, qa) {
 function App() {
   const [screen, setScreen] = useState("landing");
   const [accountType, setAccountType] = useState("Personal");
-  const [apiKey, setApiKeyState] = useState(loadKey());
-  const setApiKey = (k) => { saveKey(k); setApiKeyState(k); };
   // The user's living memory: name/email from signup + onboarding answers. Empty until they sign up.
   const [profile, setProfile] = useState({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
 
-  // vault state shared between Vaults + create flow
-  const [categories, setCategories] = useState(["Marketing", "Client Emails", "Social Media", "Internal Comms"]);
-  const [folders, setFolders] = useState({
-    "Marketing": [
-      { name: "LinkedIn thought leadership post", date: "2 days ago", text: MOCK_PROMPT },
-      { name: "Brand voice guide intro", date: "1 week ago", text: MOCK_PROMPT },
-    ],
-    "Client Emails": [{ name: "Client email follow-up", date: "4 days ago", text: MOCK_PROMPT }],
-    "Social Media": [],
-    "Internal Comms": [],
-  });
+  // vault state shared between Vaults + create flow — empty until the user creates their own
+  const [categories, setCategories] = useState([]);
+  const [folders, setFolders] = useState({});
+
+  // --- Cloud sync (Supabase) ---
+  const [sbCfg, setSbCfg] = useState(loadCfg());
+  const sbRef = useRef(makeClient(loadCfg()));
+  const sb = sbRef.current;
+  const [user, setUser] = useState(null);
+  const [cloudMsg, setCloudMsg] = useState("");
+  const hydrating = useRef(false);
+  const saveTimer = useRef(null);
 
   const go = (s) => { setScreen(s); window.scrollTo(0, 0); };
 
-  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, apiKey, setApiKey, profile, setProfile };
+  const configureCloud = (cfg) => { saveCfg(cfg); setSbCfg(cfg); sbRef.current = makeClient(cfg); };
+
+  const hasProfile = (blob) => !!(blob && blob.profile && blob.profile.answers && Object.keys(blob.profile.answers).length > 0);
+
+  const hydrate = async (u) => {
+    hydrating.current = true;
+    let blob = null;
+    try {
+      blob = await loadState(sb, u.id);
+      if (blob) {
+        if (blob.accountType) setAccountType(blob.accountType);
+        if (blob.profile) setProfile(blob.profile);
+        if (blob.categories) setCategories(blob.categories);
+        if (blob.folders) setFolders(blob.folders);
+      }
+    } catch (e) { setCloudMsg("Couldn't load your saved data: " + e.message); }
+    setTimeout(() => { hydrating.current = false; }, 0);
+    return blob;
+  };
+
+  // Restore an existing session on load — finished profiles go Home, unfinished go to onboarding.
+  useEffect(() => {
+    if (!sb) return;
+    sb.auth.getSession().then(async ({ data }) => {
+      const u = data && data.session ? data.session.user : null;
+      if (u) { setUser(u); const blob = await hydrate(u); go(hasProfile(blob) ? "home" : "wizard"); }
+    });
+  }, []);
+
+  // Autosave to the cloud (debounced) whenever the memory changes while logged in.
+  useEffect(() => {
+    if (!sb || !user || hydrating.current) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      saveState(sb, user.id, { accountType, profile, categories, folders }).catch((e) => setCloudMsg("Save failed: " + e.message));
+    }, 800);
+  }, [accountType, profile, categories, folders, user]);
+
+  const auth = {
+    sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
+    signUp: async (email, password, name) => {
+      if (!sb) return { ok: true, local: true };
+      const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
+      if (error) return { ok: false, error: error.message };
+      if (data.session) { setUser(data.user); return { ok: true }; }
+      return { ok: true, confirm: true };
+    },
+    signIn: async (email, password) => {
+      if (!sb) return { ok: true, local: true };
+      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) return { ok: false, error: error.message };
+      setUser(data.user); const blob = await hydrate(data.user); return { ok: true, hasProfile: hasProfile(blob) };
+    },
+    signOut: async () => {
+      if (sb) { try { await sb.auth.signOut(); } catch (e) {} }
+      setUser(null);
+      // Wipe in-memory data so the next person on this browser never sees — or
+      // accidentally overwrites their own row with — someone else's profile/vaults.
+      setProfile({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
+      setCategories([]);
+      setFolders({});
+      setAccountType("Personal");
+    },
+  };
+
+  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, profile, setProfile, auth };
 
   // screens with the app chrome (sidebar)
   const appScreens = ["home", "create", "vaults", "profile", "settings"];
@@ -317,8 +407,8 @@ function App() {
 
   let view;
   if (screen === "landing") view = <Landing go={go} />;
-  else if (screen === "signup") view = <Signup go={go} setProfile={setProfile} />;
-  else if (screen === "login") view = <Login go={go} />;
+  else if (screen === "signup") view = <Signup go={go} setProfile={setProfile} auth={auth} />;
+  else if (screen === "login") view = <Login go={go} auth={auth} />;
   else if (screen === "accountType") view = <AccountType {...ctx} />;
   else if (screen === "wizard") view = <Wizard {...ctx} />;
   else if (inApp) view = <Shell {...ctx} />;
@@ -367,11 +457,11 @@ function Landing({ go }) {
         </p>
         <div className="mt-8 flex justify-center gap-3">
           <Btn onClick={() => go("signup")} className="px-6 py-3">Get Started</Btn>
-          <Btn variant="secondary" onClick={() => go("login")} className="px-6 py-3">Learn More</Btn>
+          <Btn variant="secondary" onClick={() => { const el = document.getElementById("how"); if (el) el.scrollIntoView({ behavior: "smooth" }); }} className="px-6 py-3">Learn More</Btn>
         </div>
       </section>
 
-      <section className="mx-auto max-w-5xl px-6 pb-16">
+      <section id="how" className="mx-auto max-w-5xl px-6 pb-16 scroll-mt-6">
         <div className="text-center label text-muted mb-6">How it works</div>
         <div className="flex flex-col sm:flex-row gap-4">
           <Step n="1" title="Build your identity" body="A short adaptive onboarding wizard learns your voice, style, and goals." />
@@ -422,13 +512,34 @@ function AuthWrap({ children }) {
   );
 }
 
-function Signup({ go, setProfile }) {
+function Signup({ go, setProfile, auth }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const submit = () => {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const cloud = !!(auth && auth.sb);
+
+  const submit = async () => {
+    setErr("");
+    if (cloud) {
+      if (password.length < 6) { setErr("Password must be at least 6 characters."); return; }
+      if (password !== confirm) { setErr("Passwords don't match."); return; }
+      setBusy(true);
+      const r = await auth.signUp(email.trim(), password, name.trim());
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || "Couldn't create account."); return; }
+      setProfile((p) => ({ ...p, name: name.trim(), email: email.trim() }));
+      if (r.confirm) { setErr("Account created — check your email to confirm, then log in."); return; }
+      go("accountType");
+      return;
+    }
     setProfile((p) => ({ ...p, name: name.trim(), email: email.trim() }));
     go("accountType");
   };
+
   return (
     <AuthWrap>
       <div className="text-center mb-6"><Logo /></div>
@@ -436,9 +547,10 @@ function Signup({ go, setProfile }) {
       <div className="space-y-4">
         <Field label="Full name" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
         <Field label="Email address" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <Field label="Password" type="password" placeholder="••••••••" />
-        <Field label="Confirm password" type="password" placeholder="••••••••" />
-        <Btn className="w-full" disabled={!name.trim()} onClick={submit}>Create Account</Btn>
+        <Field label="Password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <Field label="Confirm password" type="password" placeholder="••••••••" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        {err && <p className="text-xs text-danger">{err}</p>}
+        <Btn className="w-full" disabled={!name.trim() || busy} onClick={submit}>{busy ? "Creating…" : "Create Account"}</Btn>
       </div>
       <p className="mt-5 text-center text-sm text-muted">
         Already have an account? <button className="text-brand font-medium" onClick={() => go("login")}>Log in</button>
@@ -447,15 +559,36 @@ function Signup({ go, setProfile }) {
   );
 }
 
-function Login({ go }) {
+function Login({ go, auth }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const cloud = !!(auth && auth.sb);
+
+  const submit = async () => {
+    setErr("");
+    if (cloud) {
+      setBusy(true);
+      const r = await auth.signIn(email.trim(), password);
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || "Couldn't log in."); return; }
+      go(r.hasProfile ? "home" : "wizard");
+      return;
+    }
+    go("home");
+  };
+
   return (
     <AuthWrap>
       <div className="text-center mb-6"><Logo /></div>
       <h1 className="text-xl font-medium text-center mb-6">Welcome back</h1>
       <div className="space-y-4">
-        <Field label="Email address" placeholder="you@example.com" />
-        <Field label="Password" type="password" placeholder="••••••••" />
-        <Btn className="w-full" onClick={() => go("home")}>Log In</Btn>
+        <Field label="Email address" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Field label="Password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {err && <p className="text-xs text-danger">{err}</p>}
+        <Btn className="w-full" disabled={busy} onClick={submit}>{busy ? "Logging in…" : "Log In"}</Btn>
       </div>
       <p className="mt-5 text-center text-sm text-muted">
         Don't have an account? <button className="text-brand font-medium" onClick={() => go("signup")}>Sign up</button>
@@ -499,7 +632,8 @@ function AccountType({ go, accountType, setAccountType }) {
 
 /* ----------------------------- 5. Wizard ----------------------------- */
 
-function Wizard({ go, accountType, apiKey, setProfile }) {
+function Wizard({ go, accountType, auth, setProfile }) {
+  const sb = auth && auth.sb;
   const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
   const [answers, setAnswers] = useState({});
   const [layer2, setLayer2] = useState(false);
@@ -511,6 +645,9 @@ function Wizard({ go, accountType, apiKey, setProfile }) {
   const done = Object.values(answers).filter((v) => v && String(v).trim()).length;
   const pct = Math.round((done / total) * 100);
 
+  // All 6 core profile questions must be answered before the user can move on.
+  const coreDone = fixed.every((f, i) => answers[i] && String(answers[i]).trim());
+
   const set = (k, v) => setAnswers((a) => ({ ...a, [k]: v }));
 
   // Identity text from the fixed answers, used to generate the adaptive follow-ups.
@@ -521,10 +658,10 @@ function Wizard({ go, accountType, apiKey, setProfile }) {
 
   const toLayer2 = async () => {
     setErr("");
-    if (apiKey) {
+    if (sb) {
       setBusy(true);
-      try { setL2q(await genOnboarding(apiKey, layer1Text())); }
-      catch (e) { setErr("Couldn't reach Claude — showing sample questions. " + e.message); }
+      try { setL2q(await genOnboarding(sb, layer1Text())); }
+      catch (e) { setErr("Couldn't reach the AI — showing sample questions. " + e.message); }
       setBusy(false);
     }
     setLayer2(true);
@@ -584,13 +721,14 @@ function Wizard({ go, accountType, apiKey, setProfile }) {
         {!layer2 ? (
           <div className="mt-6">
             {err && <p className="text-xs text-danger mb-2">{err}</p>}
-            <Btn className="w-full py-3" disabled={busy} onClick={toLayer2}>{busy ? "Thinking…" : "Continue to next step"}</Btn>
+            {!coreDone && <p className="text-xs text-muted mb-2">Answer all the questions above to continue — this builds your memory.</p>}
+            <Btn className="w-full py-3" disabled={busy || !coreDone} onClick={toLayer2}>{busy ? "Thinking…" : "Continue to next step"}</Btn>
           </div>
         ) : (
           <div className="mt-10 fade">
             <div className="label text-brand mb-1">Layer 2</div>
             <h2 className="text-lg font-medium mb-1">Based on what you shared, a few more questions</h2>
-            <p className="text-sm text-muted mb-5">{apiKey ? "These were written from your answers above." : "Connect Claude in Settings to make these adapt to your real answers. For now they're samples."}</p>
+            <p className="text-sm text-muted mb-5">{sb ? "These were written from your answers above." : "Connect your cloud in Settings to make these adapt to your real answers. For now they're samples."}</p>
             {err && <p className="text-xs text-danger mb-3">{err}</p>}
             <div className="space-y-5">
               {l2q.map((q, i) => (
@@ -601,7 +739,7 @@ function Wizard({ go, accountType, apiKey, setProfile }) {
               ))}
             </div>
             <div className="mt-6">
-              <Btn className="w-full py-3" onClick={complete}>Complete my profile</Btn>
+              <Btn className="w-full py-3" disabled={!coreDone} onClick={complete}>Complete my profile</Btn>
             </div>
           </div>
         )}
@@ -644,7 +782,9 @@ function Shell(props) {
           ))}
         </nav>
         <div className="mt-auto flex items-center gap-3 border-t border-line pt-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-tint text-sm font-medium text-brand">{initials(profile.name)}</div>
+          <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-tint text-sm font-medium text-brand">
+            {profile.avatar ? <img src={profile.avatar} alt="" className="h-full w-full object-cover" /> : initials(profile.name)}
+          </div>
           <div className="leading-tight min-w-0">
             <div className="text-sm font-medium truncate">{profile.name || "Your account"}</div>
             <div className="text-xs text-muted">{accountType}</div>
@@ -682,8 +822,16 @@ function PageHead({ title, sub, right }) {
 
 /* ----------------------------- 6. Home ----------------------------- */
 
-function Home({ go }) {
+function Home({ go, folders }) {
   const [tut, setTut] = useState(true);
+  const [copiedKey, setCopiedKey] = useState(null);
+
+  // real recents: every saved prompt across folders, newest first
+  const recents = [];
+  Object.keys(folders || {}).forEach((cat) => (folders[cat] || []).forEach((p, i) => recents.push({ ...p, cat, key: cat + "-" + i })));
+  recents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const recent = recents.slice(0, 5);
+
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       {tut && (
@@ -713,35 +861,44 @@ function Home({ go }) {
       </Card>
 
       <h3 className="text-sm font-medium mb-3">Recent prompts</h3>
-      <div className="space-y-3">
-        {RECENTS.map((r) => (
-          <Card key={r.title} className="p-4 flex items-center justify-between hover:border-brand/40 transition-colors">
-            <div>
-              <div className="text-sm font-medium">{r.title}</div>
-              <div className="text-xs text-muted mt-0.5">{r.cat} · {r.date}</div>
-            </div>
-            <button className="text-muted hover:text-brand p-2" title="Copy"><Icon d={icons.copy} /></button>
-          </Card>
-        ))}
-      </div>
+      {recent.length === 0 ? (
+        <Card className="p-6 text-sm text-muted text-center">No prompts yet — create your first one above.</Card>
+      ) : (
+        <div className="space-y-3">
+          {recent.map((r) => (
+            <Card key={r.key} className="p-4 flex items-center justify-between hover:border-brand/40 transition-colors">
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{r.name}</div>
+                <div className="text-xs text-muted mt-0.5">{r.cat} · {whenLabel(r.ts) || r.date}</div>
+              </div>
+              <button className="text-muted hover:text-brand p-2 shrink-0" title="Copy"
+                onClick={() => { try { navigator.clipboard && navigator.clipboard.writeText(r.text); } catch (e) {} setCopiedKey(r.key); setTimeout(() => setCopiedKey(null), 1200); }}>
+                <Icon d={copiedKey === r.key ? icons.check : icons.copy} />
+              </button>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 /* ----------------------------- 7. Create flow ----------------------------- */
 
-function Create({ go, categories, setCategories, folders, setFolders, apiKey, profile, accountType }) {
+function Create({ go, categories, setCategories, folders, setFolders, auth, profile, accountType }) {
   // step index 0..8 across 9 questions, then "output"
   const [stage, setStage] = useState(0);        // 0..8 questions, 9 = output
   const [answers, setAnswers] = useState({});
   const [followups, setFollowups] = useState({}); // { groupIndex: [q1, q2] } — AI-generated when live
+  const [followupSrc, setFollowupSrc] = useState({}); // the core answer each group's follow-ups were built from
   const [master, setMaster] = useState("");       // the generated master prompt
   const [busy, setBusy] = useState(false);         // calling Claude (followups or master)
   const [aiError, setAiError] = useState("");
   const [showSave, setShowSave] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const live = !!apiKey;
+  const sb = auth && auth.sb;
+  const live = !!sb;
   const profileStr = profileToText(profile, accountType); // the user's memory, fed into every call
 
   // build linear list of 9 questions; adaptive text is AI-generated when live, sample otherwise
@@ -759,14 +916,19 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey, pr
   const allQA = () => flat.map((f) => [f.q, answers[f.key] || ""]);
   const promptText = master || MOCK_PROMPT;
 
-  // After answering a core question, generate its two follow-ups (live only, once).
+  // After answering a core question, generate its two follow-ups (live only).
+  // Regenerate if the core answer changed since the follow-ups were last built.
   const advance = async () => {
     setAiError("");
-    if (live && cur.kind === "core" && !followups[cur.group]) {
+    const stale = cur.kind === "core" && (!followups[cur.group] || followupSrc[cur.group] !== val);
+    if (live && stale) {
       setBusy(true);
       try {
-        const fups = await genFollowups(apiKey, profileStr, cur.q, val);
+        const fups = await genFollowups(sb, profileStr, cur.q, val);
         setFollowups((f) => ({ ...f, [cur.group]: fups }));
+        setFollowupSrc((s) => ({ ...s, [cur.group]: val }));
+        // The old follow-up answers were for different questions — clear them.
+        setAnswers((a) => { const n = { ...a }; delete n["a" + cur.group]; delete n["b" + cur.group]; return n; });
       } catch (e) {
         setAiError("Couldn't reach Claude — using a sample follow-up. " + e.message);
       }
@@ -780,7 +942,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey, pr
     if (!live) { setMaster(MOCK_PROMPT); return; }
     setBusy(true); setAiError("");
     try {
-      setMaster(await genMasterPrompt(apiKey, profileStr, allQA()));
+      setMaster(await genMasterPrompt(sb, profileStr, allQA()));
     } catch (e) {
       setMaster(MOCK_PROMPT);
       setAiError("Couldn't reach Claude — showing a sample prompt. " + e.message);
@@ -818,7 +980,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey, pr
             categories={categories} setCategories={setCategories}
             onClose={() => setShowSave(false)}
             onSave={(name, cat) => {
-              setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", text: promptText }, ...(f[cat] || [])] }));
+              setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", ts: Date.now(), text: promptText }, ...(f[cat] || [])] }));
               setShowSave(false);
               go("vaults");
             }}
@@ -840,7 +1002,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey, pr
         ) : (
           <span className="inline-flex items-center gap-2 text-xs text-muted">
             Sample mode — follow-ups are examples.
-            <button className="text-brand font-medium" onClick={() => go("settings")}>Connect Claude</button>
+            <button className="text-brand font-medium" onClick={() => go("settings")}>Connect cloud</button>
           </span>
         )}
       </div>
@@ -878,38 +1040,42 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey, pr
 }
 
 function SaveModal({ categories, setCategories, onClose, onSave }) {
+  // Remembers whether a click started on the dark backdrop, so the popup only
+  // closes on a real outside-click — not from the click that opened it.
+  const backdropDown = useRef(false);
   const [name, setName] = useState("");
   const [cat, setCat] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [newCat, setNewCat] = useState("");
 
-  const finalCat = creating ? newCat.trim() : cat;
+  const finalCat = cat.trim();
   const canSave = name.trim() && finalCat;
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/30 px-6" onClick={onClose}>
-      <Card className="w-full max-w-sm p-6 fade" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/30 px-6"
+      onMouseDown={(e) => { backdropDown.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && backdropDown.current) onClose(); }}>
+      <Card className="w-full max-w-sm p-6 fade" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-medium mb-4">Save your prompt</h2>
         <div className="space-y-4">
           <Field label="Prompt name" placeholder="e.g. Q2 launch email" value={name} onChange={(e) => setName(e.target.value)} />
-          {!creating ? (
-            <label className="block">
-              <span className="label text-muted block mb-1.5">Category</span>
-              <select value={cat} onChange={(e) => { if (e.target.value === "__new") { setCreating(true); } else setCat(e.target.value); }}
-                className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand">
-                <option value="">Choose a category…</option>
-                {categories.map((c) => <option key={c}>{c}</option>)}
-                <option value="__new">+ Create new category</option>
-              </select>
-            </label>
-          ) : (
-            <Field label="New category" placeholder="Category name" value={newCat} onChange={(e) => setNewCat(e.target.value)} />
-          )}
+          <div>
+            <span className="label text-muted block mb-1.5">Category</span>
+            <Field placeholder="Type a category, or pick one below" value={cat} onChange={(e) => setCat(e.target.value)} />
+            {categories.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {categories.map((c) => (
+                  <button key={c} type="button" onClick={() => setCat(c)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${cat.trim().toLowerCase() === c.toLowerCase() ? "bg-brand text-white" : "bg-tagbg text-tagink hover:bg-brand/10"}`}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         <div className="mt-6 flex items-center justify-end gap-3">
           <button className="text-sm text-muted hover:text-ink" onClick={onClose}>Cancel</button>
           <Btn disabled={!canSave} onClick={() => {
-            if (creating && !categories.some((c) => c.toLowerCase() === finalCat.toLowerCase())) setCategories((cs) => [...cs, finalCat]);
+            if (!categories.some((c) => c.toLowerCase() === finalCat.toLowerCase())) setCategories((cs) => [...cs, finalCat]);
             onSave(name.trim(), finalCat);
           }}>Save</Btn>
         </div>
@@ -918,13 +1084,133 @@ function SaveModal({ categories, setCategories, onClose, onSave }) {
   );
 }
 
+/* ----------------------------- Avatar editor (upload + zoom + drag) ----------------------------- */
+
+function AvatarEditor({ initial, onClose, onSave, onRemove }) {
+  // Only closes on a true outside-click — same guard as the save popup.
+  const backdropDown = useRef(false);
+  const D = 256;   // preview circle size (px)
+  const OUT = 256; // saved square size (px)
+  const fileRef = useRef(null);
+  const dragRef = useRef(null);
+  const [imgEl, setImgEl] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [off, setOff] = useState({ x: 0, y: 0 });
+  const [err, setErr] = useState("");
+
+  const cover = imgEl ? D / Math.min(imgEl.naturalWidth, imgEl.naturalHeight) : 1;
+  const displayScale = cover * zoom;
+  const dispW = imgEl ? imgEl.naturalWidth * displayScale : 0;
+  const dispH = imgEl ? imgEl.naturalHeight * displayScale : 0;
+
+  // Keep the photo covering the circle — no empty gaps when dragging/zooming.
+  const clamp = (o) => ({
+    x: Math.min(0, Math.max(D - dispW, o.x)),
+    y: Math.min(0, Math.max(D - dispH, o.y)),
+  });
+
+  useEffect(() => { if (imgEl) setOff((o) => clamp(o)); }, [zoom, imgEl]);
+
+  const pickFile = () => { if (fileRef.current) fileRef.current.click(); };
+
+  const onFile = (e) => {
+    setErr("");
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (!f.type || !f.type.startsWith("image/")) { setErr("Please choose an image file."); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const cv = D / Math.min(im.naturalWidth, im.naturalHeight);
+        setImgEl(im);
+        setZoom(1);
+        setOff({ x: (D - im.naturalWidth * cv) / 2, y: (D - im.naturalHeight * cv) / 2 });
+      };
+      im.onerror = () => setErr("Couldn't read that image.");
+      im.src = reader.result;
+    };
+    reader.onerror = () => setErr("Couldn't read that file.");
+    reader.readAsDataURL(f);
+  };
+
+  const onDown = (e) => {
+    if (!imgEl) return;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (x) {}
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: off.x, oy: off.y };
+  };
+  const onMove = (e) => {
+    if (!dragRef.current) return;
+    setOff(clamp({ x: dragRef.current.ox + (e.clientX - dragRef.current.sx), y: dragRef.current.oy + (e.clientY - dragRef.current.sy) }));
+  };
+  const onUp = () => { dragRef.current = null; };
+
+  const save = () => {
+    if (!imgEl) return;
+    try {
+      const c = document.createElement("canvas");
+      c.width = OUT; c.height = OUT;
+      const ctx = c.getContext("2d");
+      const s = 1 / displayScale;
+      ctx.drawImage(imgEl, (0 - off.x) * s, (0 - off.y) * s, D * s, D * s, 0, 0, OUT, OUT);
+      onSave(c.toDataURL("image/jpeg", 0.85));
+    } catch (x) { setErr("Couldn't save the photo."); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/30 px-6"
+      onMouseDown={(e) => { backdropDown.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && backdropDown.current) onClose(); }}>
+      <Card className="w-full max-w-sm p-6 fade" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-medium mb-1">Profile photo</h2>
+        <p className="text-sm text-muted mb-4">{imgEl ? "Drag to move · use the slider to zoom." : "Upload a photo to set your profile picture."}</p>
+
+        {!imgEl ? (
+          <button onClick={pickFile}
+            className="w-full rounded-xl border-2 border-dashed border-line py-10 text-sm text-muted hover:border-brand hover:text-brand transition-colors">
+            Click to choose a photo
+          </button>
+        ) : (
+          <div>
+            <div style={{ width: D, height: D }}
+              className="relative mx-auto overflow-hidden rounded-full bg-tint cursor-move touch-none select-none"
+              onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+              <img src={imgEl.src} alt="" draggable={false}
+                style={{ position: "absolute", left: off.x, top: off.y, width: dispW, height: dispH, maxWidth: "none" }} />
+              <div className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-white/70" />
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <span className="text-xs text-muted">Zoom</span>
+              <input type="range" min="1" max="3" step="0.01" value={zoom}
+                onChange={(e) => setZoom(parseFloat(e.target.value))} className="flex-1 accent-brand" />
+            </div>
+            <button onClick={pickFile} className="mt-3 text-sm text-brand font-medium">Choose a different photo</button>
+          </div>
+        )}
+
+        {err && <p className="mt-3 text-xs text-danger">{err}</p>}
+        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
+
+        <div className="mt-6 flex items-center justify-between gap-3">
+          <div>{initial ? <button className="text-sm text-danger" onClick={onRemove}>Remove photo</button> : null}</div>
+          <div className="flex items-center gap-3">
+            <button className="text-sm text-muted hover:text-ink" onClick={onClose}>Cancel</button>
+            <Btn disabled={!imgEl} onClick={save}>Save photo</Btn>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 /* ----------------------------- 8. Vaults ----------------------------- */
 
-function Vaults({ categories, setCategories, folders, setFolders }) {
+function Vaults({ go, categories, setCategories, folders, setFolders }) {
   const [open, setOpen] = useState(null); // folder name
   const [query, setQuery] = useState("");
   const [newTag, setNewTag] = useState("");
   const [dupe, setDupe] = useState(false);
+  const tagInputRef = useRef(null);
 
   const addTag = () => {
     const v = newTag.trim();
@@ -941,13 +1227,13 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
     if (open === t) setOpen(null);
   };
 
-  if (open) return <FolderView name={open} folders={folders} setFolders={setFolders} onBack={() => setOpen(null)} />;
+  if (open) return <FolderView name={open} go={go} folders={folders} setFolders={setFolders} onBack={() => setOpen(null)} />;
 
   const folderNames = categories.filter((c) => !query || c.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
-      <PageHead title="My Vaults" right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Folder</Btn>} />
+      <PageHead title="My Vaults" right={<Btn onClick={() => tagInputRef.current && tagInputRef.current.focus()}><Icon d={icons.plus} className="h-4 w-4" /> New Folder</Btn>} />
 
       <div className="relative mb-6">
         <Icon d={icons.search} className="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -972,6 +1258,7 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
         )}
         <div className="flex gap-2">
           <input
+            ref={tagInputRef}
             value={newTag}
             maxLength={32}
             onChange={(e) => { setNewTag(e.target.value); setDupe(false); }}
@@ -1001,22 +1288,35 @@ function Vaults({ categories, setCategories, folders, setFolders }) {
   );
 }
 
-function FolderView({ name, folders, setFolders, onBack }) {
+function FolderView({ name, go, folders, setFolders, onBack }) {
   const items = folders[name] || [];
   const [editIdx, setEditIdx] = useState(null);
   const [draft, setDraft] = useState("");
   const [confirmIdx, setConfirmIdx] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
+  const [note, setNote] = useState("");
 
   const update = (idx, text) => setFolders((f) => ({ ...f, [name]: f[name].map((p, i) => i === idx ? { ...p, text } : p) }));
   const remove = (idx) => setFolders((f) => ({ ...f, [name]: f[name].filter((_, i) => i !== idx) }));
+  const copyText = (t) => { try { navigator.clipboard && navigator.clipboard.writeText(t); } catch (e) {} };
+  const flash = (msg) => { setNote(msg); setTimeout(() => setNote(""), 1500); };
+  const exportTxt = (p) => {
+    try {
+      const blob = new Blob([p.text], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = (p.name || "prompt").replace(/[^a-z0-9]+/gi, "-").toLowerCase() + ".txt";
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch (e) { flash("Couldn't export"); }
+  };
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       <button className="flex items-center gap-1 text-sm text-muted hover:text-ink mb-4" onClick={onBack}>
         <Icon d={icons.back} className="h-4 w-4" /> My Vaults
       </button>
-      <PageHead title={name} right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Prompt</Btn>} />
+      <PageHead title={name} right={<Btn onClick={() => go("create")}><Icon d={icons.plus} className="h-4 w-4" /> New Prompt</Btn>} />
+      {note && <p className="mb-3 text-xs text-ok">{note}</p>}
 
       {items.length === 0 ? (
         <Card className="p-10 text-center text-muted">No prompts in this folder yet.</Card>
@@ -1027,14 +1327,14 @@ function FolderView({ name, folders, setFolders, onBack }) {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-sm font-medium">{p.name}</div>
-                  <div className="text-xs text-muted mt-0.5">{p.date}</div>
+                  <div className="text-xs text-muted mt-0.5">{whenLabel(p.ts) || p.date}</div>
                   {editIdx !== idx && <div className="text-sm text-muted mt-2 truncate">{p.text.split("\n")[0]}</div>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0 text-muted">
                   <button title="Edit" className="p-1.5 hover:text-brand" onClick={() => { setEditIdx(idx); setDraft(p.text); }}><Icon d={icons.edit} className="h-4 w-4" /></button>
-                  <button title="Copy" className="p-1.5 hover:text-brand" onClick={() => { setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 1200); }}><Icon d={copiedIdx === idx ? icons.check : icons.copy} className="h-4 w-4" /></button>
-                  <button title="Share" className="p-1.5 hover:text-brand"><Icon d={icons.share} className="h-4 w-4" /></button>
-                  <button title="Export" className="p-1.5 hover:text-brand"><Icon d={icons.download} className="h-4 w-4" /></button>
+                  <button title="Copy" className="p-1.5 hover:text-brand" onClick={() => { copyText(p.text); setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 1200); }}><Icon d={copiedIdx === idx ? icons.check : icons.copy} className="h-4 w-4" /></button>
+                  <button title="Copy to share" className="p-1.5 hover:text-brand" onClick={() => { copyText(p.text); flash("Copied — paste anywhere to share"); }}><Icon d={icons.share} className="h-4 w-4" /></button>
+                  <button title="Export as .txt" className="p-1.5 hover:text-brand" onClick={() => exportTxt(p)}><Icon d={icons.download} className="h-4 w-4" /></button>
                   <button title="Delete" className="p-1.5 hover:text-danger" onClick={() => setConfirmIdx(idx)}><Icon d={icons.trash} className="h-4 w-4" /></button>
                 </div>
               </div>
@@ -1071,36 +1371,87 @@ function FolderView({ name, folders, setFolders, onBack }) {
 function Profile({ accountType, profile, setProfile }) {
   const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
   const ans = profile.answers || {};
-  const fields = fixed.map((f, i) => ({
-    key: i,
-    label: f.q,
+  const l2 = profile.layer2 || {};
+  const l2q = profile.l2q || ADAPTIVE_MOCK;
+
+  // Both the fixed questions AND the adaptive Layer-2 answers are editable here.
+  const fixedFields = fixed.map((f, i) => ({
+    id: "fix-" + i, label: f.q, type: f.type || "text", opts: f.opts,
     value: (ans[i] != null && String(ans[i]).trim()) ? String(ans[i]) : "—",
+    save: (v) => setProfile((p) => ({ ...p, answers: { ...(p.answers || {}), [i]: v } })),
   }));
+  const l2Fields = Object.keys(l2).map((k) => {
+    const qi = parseInt(String(k).replace("a", ""), 10);
+    return {
+      id: "l2-" + k, label: l2q[qi] || "Follow-up", type: "text", opts: null,
+      value: (l2[k] != null && String(l2[k]).trim()) ? String(l2[k]) : "—",
+      save: (v) => setProfile((p) => ({ ...p, layer2: { ...(p.layer2 || {}), [k]: v } })),
+    };
+  });
+  const fields = [...fixedFields, ...l2Fields];
   const filled = fields.filter((f) => f.value !== "—");
   const traits = filled.slice(0, 3);
 
-  const [editIdx, setEditIdx] = useState(null);
+  // edit the name + email on the identity card
+  const [editId, setEditId] = useState(false);
+  const [editPhoto, setEditPhoto] = useState(false);
+  const [nameDraft, setNameDraft] = useState(profile.name || "");
+  const [emailDraft, setEmailDraft] = useState(profile.email || "");
+  const openId = () => { setNameDraft(profile.name || ""); setEmailDraft(profile.email || ""); setEditId(true); };
+  const saveId = () => { setProfile((p) => ({ ...p, name: nameDraft.trim(), email: emailDraft.trim() })); setEditId(false); };
+
+  // edit each onboarding answer (fixed or adaptive)
+  const [editKey, setEditKey] = useState(null);
   const [draft, setDraft] = useState("");
-  const saveField = (i) => {
-    setProfile((p) => ({ ...p, answers: { ...(p.answers || {}), [i]: draft } }));
-    setEditIdx(null);
-  };
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
+      {editPhoto && (
+        <AvatarEditor
+          initial={profile.avatar}
+          onClose={() => setEditPhoto(false)}
+          onSave={(dataUrl) => { setProfile((p) => ({ ...p, avatar: dataUrl })); setEditPhoto(false); }}
+          onRemove={() => { setProfile((p) => ({ ...p, avatar: "" })); setEditPhoto(false); }}
+        />
+      )}
       <Card className="p-7 mb-8">
-        <div className="flex items-center gap-4">
-          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand">{initials(profile.name)}</div>
-          <div className="min-w-0">
-            <div className="text-lg font-medium">{profile.name || "—"}</div>
-            <div className="text-sm text-muted">{profile.email || "—"}</div>
-            <div className="mt-2"><Badge>{accountType}</Badge></div>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-4 min-w-0">
+            <button type="button" onClick={() => setEditPhoto(true)} title="Change photo"
+              className="group relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-full bg-tint text-lg font-medium text-brand shrink-0">
+              {profile.avatar
+                ? <img src={profile.avatar} alt="" className="h-full w-full object-cover" />
+                : <span>{initials(profile.name)}</span>}
+              <span className="absolute inset-0 hidden items-center justify-center bg-ink/45 text-[10px] font-medium text-white group-hover:flex">Edit</span>
+            </button>
+            {editId ? (
+              <div className="fade w-full">
+                <Field label="Name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} />
+                <div className="mt-2"><Field label="Email" value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} /></div>
+              </div>
+            ) : (
+              <div className="min-w-0">
+                <div className="text-lg font-medium truncate">{profile.name || "—"}</div>
+                <div className="text-sm text-muted truncate">{profile.email || "—"}</div>
+                <div className="mt-2"><Badge>{accountType}</Badge></div>
+              </div>
+            )}
           </div>
+          {editId ? (
+            <div className="flex gap-2 shrink-0">
+              <Btn onClick={saveId}>Save</Btn>
+              <Btn variant="ghost" onClick={() => setEditId(false)}>Cancel</Btn>
+            </div>
+          ) : (
+            <Btn variant="secondary" className="shrink-0" onClick={openId}>
+              <Icon d={icons.edit} className="h-4 w-4" /> Edit
+            </Btn>
+          )}
         </div>
-        {traits.length > 0 && (
+        {traits.length > 0 && !editId && (
           <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-line pt-5">
             {traits.map((t) => (
-              <div key={t.key}>
+              <div key={t.id}>
                 <div className="label text-muted mb-1">{t.label}</div>
                 <div className="text-sm">{t.value}</div>
               </div>
@@ -1115,21 +1466,41 @@ function Profile({ accountType, profile, setProfile }) {
         <Card className="p-6 text-sm text-muted">No profile answers yet. Complete onboarding to build your identity.</Card>
       ) : (
         <div className="space-y-3">
-          {fields.map((f, i) => (
-            <Card key={i} className="p-4">
-              <div className="label text-muted mb-1.5">{f.label}</div>
-              {editIdx === i ? (
-                <div className="fade">
-                  <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
+          {fields.map((f) => (
+            <Card key={f.id} className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="label text-muted">{f.label}</div>
+                {editKey !== f.id && (
+                  <button className="text-muted hover:text-brand p-1 shrink-0" title="Edit" onClick={() => { setEditKey(f.id); setDraft(f.value === "—" ? "" : f.value); }}>
+                    <Icon d={icons.edit} className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+              {editKey === f.id ? (
+                <div className="fade mt-1.5">
+                  {f.type === "toggle" ? (
+                    <div className="flex gap-2">
+                      {f.opts.map((o) => (
+                        <button key={o} onClick={() => setDraft(o)}
+                          className={`flex-1 rounded-lg border px-4 py-2.5 text-sm ${draft === o ? "border-brand bg-tint text-brand font-medium" : "border-line text-muted"}`}>{o}</button>
+                      ))}
+                    </div>
+                  ) : f.type === "select" ? (
+                    <select value={draft} onChange={(e) => setDraft(e.target.value)}
+                      className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand">
+                      <option value="">Choose one…</option>
+                      {f.opts.map((o) => <option key={o}>{o}</option>)}
+                    </select>
+                  ) : (
+                    <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
+                  )}
                   <div className="mt-2 flex gap-2">
-                    <Btn onClick={() => saveField(i)}>Save</Btn>
-                    <Btn variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Btn>
+                    <Btn onClick={() => { f.save(draft); setEditKey(null); }}>Save</Btn>
+                    <Btn variant="ghost" onClick={() => setEditKey(null)}>Cancel</Btn>
                   </div>
                 </div>
               ) : (
-                <button className="text-left w-full text-sm hover:text-brand" onClick={() => { setEditIdx(i); setDraft(f.value === "—" ? "" : f.value); }}>
-                  {f.value}
-                </button>
+                <div className="text-sm mt-1.5">{f.value}</div>
               )}
             </Card>
           ))}
@@ -1141,41 +1512,35 @@ function Profile({ accountType, profile, setProfile }) {
 
 /* ----------------------------- 10. Settings ----------------------------- */
 
-function KeyEditor({ apiKey, setApiKey }) {
-  const [draft, setDraft] = useState(apiKey || "");
-  const [status, setStatus] = useState(""); // "", "testing", "ok", "fail"
-  const [msg, setMsg] = useState("");
-
-  const test = async () => {
-    setStatus("testing"); setMsg("");
-    try {
-      await callClaude(draft.trim(), { system: "Reply with the single word: ok", user: "ok", model: AI.model_fast, max_tokens: 5 });
-      setApiKey(draft.trim());
-      setStatus("ok"); setMsg("Working — you're connected.");
-    } catch (e) {
-      setStatus("fail"); setMsg((e.message || "Couldn't connect.") + " (Check the key and that your Console has credit.)");
-    }
-  };
-
-  return (
-    <div>
-      <div className="flex gap-2 items-end">
-        <div className="flex-1"><Field label="Claude API key" type="password" placeholder="sk-ant-..." value={draft} onChange={(e) => { setDraft(e.target.value); setStatus(""); setMsg(""); }} /></div>
-        <Btn variant="secondary" disabled={!draft.trim()} onClick={() => { setApiKey(draft.trim()); setStatus("ok"); setMsg("Saved."); }}>Save</Btn>
-      </div>
-      <div className="mt-3 flex items-center gap-4">
-        <Btn variant="ghost" disabled={!draft.trim() || status === "testing"} onClick={test}>{status === "testing" ? "Testing…" : "Test connection"}</Btn>
-        {apiKey && <button className="text-xs text-danger" onClick={() => { setApiKey(""); setDraft(""); setStatus(""); setMsg("Disconnected."); }}>Remove key</button>}
-      </div>
-      {msg && <p className={`mt-2 text-xs ${status === "fail" ? "text-danger" : "text-ok"}`}>{msg}</p>}
-    </div>
-  );
-}
-
-function Settings({ go, apiKey, setApiKey, profile }) {
+function Settings({ go, profile, auth }) {
   const [emailNotif, setEmailNotif] = useState(true);
   const [weekly, setWeekly] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+
+  const cloud = !!(auth && auth.sb && auth.user);
+  const [email, setEmail] = useState(profile.email || "");
+  const [pw, setPw] = useState("");
+  const [acctMsg, setAcctMsg] = useState("");
+  const [acctBad, setAcctBad] = useState(false);
+  const say = (msg, bad) => { setAcctMsg(msg); setAcctBad(!!bad); };
+
+  const saveEmail = async () => {
+    if (!cloud) { say("Connect an account first.", true); return; }
+    const { error } = await auth.sb.auth.updateUser({ email: email.trim() });
+    error ? say(error.message, true) : say("Check your new email to confirm the change.");
+  };
+  const savePassword = async () => {
+    if (!cloud) { say("Connect an account first.", true); return; }
+    if (pw.length < 6) { say("Password must be at least 6 characters.", true); return; }
+    const { error } = await auth.sb.auth.updateUser({ password: pw });
+    if (error) { say(error.message, true); } else { setPw(""); say("Password updated."); }
+  };
+  const deleteAccount = async () => {
+    // Clears your saved profile + vault from the cloud and signs you out.
+    if (cloud) { try { await saveState(auth.sb, auth.user.id, {}); } catch (e) {} }
+    await auth.signOut();
+    go("landing");
+  };
 
   const Toggle = ({ on, onClick, label }) => (
     <div className="flex items-center justify-between py-2">
@@ -1190,31 +1555,20 @@ function Settings({ go, apiKey, setApiKey, profile }) {
     <div className="mx-auto max-w-2xl px-6 py-8">
       <PageHead title="Settings" />
 
-      <Card className="p-6 mb-5">
-        <div className="label text-muted mb-3">AI connection</div>
-        <div className="flex items-center gap-2 mb-3">
-          <span className={`h-2 w-2 rounded-full ${apiKey ? "bg-ok" : "bg-line"}`} />
-          <span className="text-sm font-medium">{apiKey ? "Connected to Claude" : "Not connected"}</span>
-        </div>
-        <p className="text-sm text-muted mb-4 leading-relaxed">
-          Paste your Claude API key to make the Create flow generate real adaptive questions and master prompts.
-          Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-brand">console.anthropic.com</a>.
-          The key stays in this browser only — don't share this file with your key saved in it.
-        </p>
-        <KeyEditor apiKey={apiKey} setApiKey={setApiKey} />
-      </Card>
+      {auth.cloudMsg && <p className="mb-4 text-xs text-danger">{auth.cloudMsg}</p>}
 
       <Card className="p-6 mb-5">
         <div className="label text-muted mb-4">Account</div>
         <div className="space-y-4">
           <div className="flex gap-2 items-end">
-            <div className="flex-1"><Field label="Change email" defaultValue={profile.email || ""} placeholder="you@example.com" /></div>
-            <Btn variant="secondary">Save</Btn>
+            <div className="flex-1"><Field label="Change email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></div>
+            <Btn variant="secondary" onClick={saveEmail}>Save</Btn>
           </div>
           <div className="flex gap-2 items-end">
-            <div className="flex-1"><Field label="Change password" type="password" placeholder="New password" /></div>
-            <Btn variant="secondary">Save</Btn>
+            <div className="flex-1"><Field label="Change password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="New password" /></div>
+            <Btn variant="secondary" onClick={savePassword}>Save</Btn>
           </div>
+          {acctMsg && <p className={`text-xs ${acctBad ? "text-danger" : "text-ok"}`}>{acctMsg}</p>}
         </div>
       </Card>
 
@@ -1238,19 +1592,19 @@ function Settings({ go, apiKey, setApiKey, profile }) {
       <Card className="p-6 mb-5 border-danger/40">
         <div className="label text-danger mb-3">Danger zone</div>
         {!confirmDel ? (
-          <Btn variant="danger" onClick={() => setConfirmDel(true)}>Delete account</Btn>
+          <Btn variant="danger" onClick={() => setConfirmDel(true)}>Delete my data</Btn>
         ) : (
           <div className="fade">
-            <div className="text-sm mb-3">This permanently deletes your account and all vaults. This cannot be undone.</div>
+            <div className="text-sm mb-3">This erases your saved profile and vaults and signs you out. This cannot be undone.</div>
             <div className="flex gap-2">
-              <Btn variant="danger" onClick={() => setConfirmDel(false)}>Yes, delete</Btn>
+              <Btn variant="danger" onClick={deleteAccount}>Yes, delete</Btn>
               <Btn variant="ghost" onClick={() => setConfirmDel(false)}>Cancel</Btn>
             </div>
           </div>
         )}
       </Card>
 
-      <Btn variant="secondary" className="w-full" onClick={() => go("landing")}>Log out</Btn>
+      <Btn variant="secondary" className="w-full" onClick={async () => { await auth.signOut(); go("landing"); }}>Log out</Btn>
     </div>
   );
 }
