@@ -100,8 +100,8 @@ function TextArea({ label, rows = 3, ...rest }) {
   );
 }
 
-function Card({ children, className = "" }) {
-  return <div className={`rounded-xl border border-line bg-white ${className}`}>{children}</div>;
+function Card({ children, className = "", ...rest }) {
+  return <div className={`rounded-xl border border-line bg-white ${className}`} {...rest}>{children}</div>;
 }
 
 function Badge({ children }) {
@@ -208,6 +208,7 @@ function loadCfg() {
   if (SUPABASE_URL_DEFAULT && SUPABASE_KEY_DEFAULT) return { url: SUPABASE_URL_DEFAULT, key: SUPABASE_KEY_DEFAULT };
   return saved;
 }
+function saveCfg(c) { try { c ? localStorage.setItem(LS_SB, JSON.stringify(c)) : localStorage.removeItem(LS_SB); } catch (e) {} }
 function makeClient(cfg) {
   if (!cfg || !cfg.url || !cfg.key) return null;
   if (typeof supabase === "undefined" || !supabase.createClient) return null;
@@ -253,7 +254,7 @@ function profileToText(profile, accountType) {
   const name = (profile && profile.name) || "(not provided)";
   const header = `Name: ${name}\nAccount type: ${accountType}`;
   return lines.length
-    ? `${header}\nProfile answers:\n${lines.join("\n")}`
+    ? `${header}\nSaved identity profile — this is the FOUNDATION for the prompt; build on it and let the voice show:\n${lines.join("\n")}`
     : `${header}\n(No profile answers captured yet — keep the output general.)`;
 }
 
@@ -279,7 +280,7 @@ async function genOnboarding(sb, layer1Str) {
 
 // Generate exactly two adaptive follow-up questions for one core project question.
 async function genFollowups(sb, profileStr, coreQ, answer) {
-  const system = "You are KonText, an engine that personalizes AI for a specific person. Given their identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper so the final output is sharper. Each question is one sentence. Return ONLY a JSON array of two strings — no other text, no markdown.";
+  const system = "You are KonText, an engine that personalizes AI for a specific person. Given their saved identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper into THIS project so the final output is sharper. Use what the profile already tells you — never ask for anything the profile already contains (like their tone, voice, values, or goals); ask only about this specific project. If their answer is vague, make one question gently push for a concrete detail. Each question is one sentence, written directly to them. Return ONLY a JSON array of two strings — no other text, no markdown.";
   const user = `${profileStr}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
   const raw = await callClaude(sb, { system, user, model: AI.model_fast, max_tokens: 300 });
   let arr;
@@ -291,7 +292,7 @@ async function genFollowups(sb, profileStr, coreQ, answer) {
 
 // Build the final master prompt from the profile + all project answers.
 async function genMasterPrompt(sb, profileStr, qa) {
-  const system = "You are KonText. Turn a person's identity profile plus their project answers into a single clean 'master prompt' they can paste into ChatGPT, Claude, or Gemini. Write it as direct instructions to an AI in second person (e.g. \"You are acting as...\"). Capture their voice, style, and goals, then the specific project, goal, and audience. Output ONLY the master prompt — no preamble, no explanation, no markdown headings. Keep it tight: 2 to 4 short paragraphs.";
+  const system = "You are KonText, an engine that turns a user's saved identity profile plus their project answers into ONE clean, copy-ready master prompt for ChatGPT, Claude, or Gemini.\n\nThe saved profile is the FOUNDATION. Build on it first, then layer the project on top. Lead with who the user is and how they sound, so the prompt is unmistakably theirs. Never just echo the user's answers back — translate their profile into voice and direction.\n\nWrite the master prompt as direct second-person instructions to an AI (e.g. \"You are acting as...\"). Weave in, in this order and in natural prose: (1) the role/context the AI is acting as, drawn from the profile; (2) the user's tone and style — this is what must make it sound like them; (3) the goal for this specific piece; (4) relevant background; (5) the audience; (6) any constraints like length, format, or platform; (7) what the AI should AVOID, using the user's own stated guardrails; (8) the desired output format; (9) the clear task.\n\nRules: Output ONLY the master prompt — no preamble, no explanation, no headings or labels. Keep it tight and copy-ready: 2 to 4 short paragraphs. The prompt must obviously reflect THIS profile — if two different users gave the same project answers, their prompts must still come out clearly different because their profiles differ.";
   const body = qa.map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n");
   const user = `${profileStr}\n\nProject answers:\n${body}`;
   return callClaude(sb, { system, user, model: AI.model_smart, max_tokens: 700 });
@@ -310,8 +311,7 @@ function App() {
   const [folders, setFolders] = useState({});
 
   // --- Cloud sync (Supabase) ---
-  // The Supabase connection is baked in (see SUPABASE_*_DEFAULT above) and connects
-  // automatically on load. Customers never configure it.
+  const [sbCfg, setSbCfg] = useState(loadCfg());
   const sbRef = useRef(makeClient(loadCfg()));
   const sb = sbRef.current;
   const [user, setUser] = useState(null);
@@ -320,6 +320,8 @@ function App() {
   const saveTimer = useRef(null);
 
   const go = (s) => { setScreen(s); window.scrollTo(0, 0); };
+
+  const configureCloud = (cfg) => { saveCfg(cfg); setSbCfg(cfg); sbRef.current = makeClient(cfg); };
 
   const hasProfile = (blob) => !!(blob && blob.profile && blob.profile.answers && Object.keys(blob.profile.answers).length > 0);
 
@@ -358,7 +360,7 @@ function App() {
   }, [accountType, profile, categories, folders, user]);
 
   const auth = {
-    sb, user, cloudMsg, setCloudMsg,
+    sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
     signUp: async (email, password, name) => {
       if (!sb) return { ok: true, local: true };
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
