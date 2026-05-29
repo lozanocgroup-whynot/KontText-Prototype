@@ -100,8 +100,8 @@ function TextArea({ label, rows = 3, ...rest }) {
   );
 }
 
-function Card({ children, className = "", ...rest }) {
-  return <div className={`rounded-xl border border-line bg-white ${className}`} {...rest}>{children}</div>;
+function Card({ children, className = "" }) {
+  return <div className={`rounded-xl border border-line bg-white ${className}`}>{children}</div>;
 }
 
 function Badge({ children }) {
@@ -254,7 +254,7 @@ function profileToText(profile, accountType) {
   const name = (profile && profile.name) || "(not provided)";
   const header = `Name: ${name}\nAccount type: ${accountType}`;
   return lines.length
-    ? `${header}\nSaved identity profile — this is the FOUNDATION for the prompt; build on it and let the voice show:\n${lines.join("\n")}`
+    ? `${header}\nProfile answers:\n${lines.join("\n")}`
     : `${header}\n(No profile answers captured yet — keep the output general.)`;
 }
 
@@ -280,7 +280,7 @@ async function genOnboarding(sb, layer1Str) {
 
 // Generate exactly two adaptive follow-up questions for one core project question.
 async function genFollowups(sb, profileStr, coreQ, answer) {
-  const system = "You are KonText, an engine that personalizes AI for a specific person. Given their saved identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper into THIS project so the final output is sharper. Use what the profile already tells you — never ask for anything the profile already contains (like their tone, voice, values, or goals); ask only about this specific project. If their answer is vague, make one question gently push for a concrete detail. Each question is one sentence, written directly to them. Return ONLY a JSON array of two strings — no other text, no markdown.";
+  const system = "You are KonText, an engine that personalizes AI for a specific person. Given their identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper so the final output is sharper. Each question is one sentence. Return ONLY a JSON array of two strings — no other text, no markdown.";
   const user = `${profileStr}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
   const raw = await callClaude(sb, { system, user, model: AI.model_fast, max_tokens: 300 });
   let arr;
@@ -292,7 +292,21 @@ async function genFollowups(sb, profileStr, coreQ, answer) {
 
 // Build the final master prompt from the profile + all project answers.
 async function genMasterPrompt(sb, profileStr, qa) {
-  const system = "You are KonText, an engine that turns a user's saved identity profile plus their project answers into ONE clean, copy-ready master prompt for ChatGPT, Claude, or Gemini.\n\nThe saved profile is the FOUNDATION. Build on it first, then layer the project on top. Lead with who the user is and how they sound, so the prompt is unmistakably theirs. Never just echo the user's answers back — translate their profile into voice and direction.\n\nWrite the master prompt as direct second-person instructions to an AI (e.g. \"You are acting as...\"). Weave in, in this order and in natural prose: (1) the role/context the AI is acting as, drawn from the profile; (2) the user's tone and style — this is what must make it sound like them; (3) the goal for this specific piece; (4) relevant background; (5) the audience; (6) any constraints like length, format, or platform; (7) what the AI should AVOID, using the user's own stated guardrails; (8) the desired output format; (9) the clear task.\n\nRules: Output ONLY the master prompt — no preamble, no explanation, no headings or labels. Keep it tight and copy-ready: 2 to 4 short paragraphs. The prompt must obviously reflect THIS profile — if two different users gave the same project answers, their prompts must still come out clearly different because their profiles differ.";
+  const system = `You are KonText. Turn a person's identity profile plus their project answers into a single clean "master prompt" they can paste into ChatGPT, Claude, or Gemini.
+
+Write it as direct instructions to an AI in second person (e.g. "You are acting as..."). Capture their voice, style, and goals first, then the specific project, goal, and audience.
+
+This voice is the DNA of every prompt you write. Follow it:
+- Write in plain English. If a simple word works, use it. Clarity beats cleverness.
+- Vary sentence length so it reads like a real person, not a template.
+- Stay grounded, calm, and confident. Be warm and personal without getting emotional. Be persuasive without sounding salesy.
+- Make it specific to this person and this project. Never generic.
+- Let transitions feel natural. Starting a sentence with "and", "but", or "so" is fine.
+- Explain complex things simply. Sound like someone with real judgment and experience, not someone performing expertise.
+
+Avoid: buzzwords and corporate-speak, robotic or repetitive sentence structure, stacking adjectives, overly formal or legal phrasing, em dashes, and AI tells like "delve", "robust", "in today's landscape", "it is important to note", "leverage", "unlock", and "transformative".
+
+Output ONLY the master prompt. No preamble, no explanation, no markdown headings. Keep it tight: 2 to 4 short paragraphs.`;
   const body = qa.map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n");
   const user = `${profileStr}\n\nProject answers:\n${body}`;
   return callClaude(sb, { system, user, model: AI.model_smart, max_tokens: 700 });
@@ -309,9 +323,6 @@ function App() {
   // vault state shared between Vaults + create flow — empty until the user creates their own
   const [categories, setCategories] = useState([]);
   const [folders, setFolders] = useState({});
-  // unfinished master prompts the user saved to come back to; resumeDraft is the one being reopened
-  const [drafts, setDrafts] = useState([]);
-  const [resumeDraft, setResumeDraft] = useState(null);
 
   // --- Cloud sync (Supabase) ---
   const [sbCfg, setSbCfg] = useState(loadCfg());
@@ -328,33 +339,17 @@ function App() {
 
   const hasProfile = (blob) => !!(blob && blob.profile && blob.profile.answers && Object.keys(blob.profile.answers).length > 0);
 
-  const emptyProfile = () => ({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
-
-  // Wipe all per-user data back to defaults. Used on sign out / sign up so one
-  // account's data can never linger into another account's session.
-  const resetUserData = () => {
-    setAccountType("Personal");
-    setProfile(emptyProfile());
-    setCategories([]);
-    setFolders({});
-    setDrafts([]);
-    setResumeDraft(null);
-  };
-
   const hydrate = async (u) => {
     hydrating.current = true;
     let blob = null;
     try {
       blob = await loadState(sb, u.id);
-      // Always start from a clean slate, then apply ONLY this user's saved data.
-      // If the user has no saved field, it resets to default — never inherits the
-      // previous account's data (which would otherwise get autosaved into this row).
-      setAccountType((blob && blob.accountType) || "Personal");
-      setProfile((blob && blob.profile) || emptyProfile());
-      setCategories((blob && blob.categories) || []);
-      setFolders((blob && blob.folders) || {});
-      setDrafts((blob && blob.drafts) || []);
-      setResumeDraft(null);
+      if (blob) {
+        if (blob.accountType) setAccountType(blob.accountType);
+        if (blob.profile) setProfile(blob.profile);
+        if (blob.categories) setCategories(blob.categories);
+        if (blob.folders) setFolders(blob.folders);
+      }
     } catch (e) { setCloudMsg("Couldn't load your saved data: " + e.message); }
     setTimeout(() => { hydrating.current = false; }, 0);
     return blob;
@@ -374,14 +369,13 @@ function App() {
     if (!sb || !user || hydrating.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveState(sb, user.id, { accountType, profile, categories, folders, drafts }).catch((e) => setCloudMsg("Save failed: " + e.message));
+      saveState(sb, user.id, { accountType, profile, categories, folders }).catch((e) => setCloudMsg("Save failed: " + e.message));
     }, 800);
-  }, [accountType, profile, categories, folders, drafts, user]);
+  }, [accountType, profile, categories, folders, user]);
 
   const auth = {
     sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
     signUp: async (email, password, name) => {
-      resetUserData(); // new account starts clean — never inherits a prior session's data
       if (!sb) return { ok: true, local: true };
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
       if (error) return { ok: false, error: error.message };
@@ -394,10 +388,10 @@ function App() {
       if (error) return { ok: false, error: error.message };
       setUser(data.user); const blob = await hydrate(data.user); return { ok: true, hasProfile: hasProfile(blob) };
     },
-    signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); resetUserData(); },
+    signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); },
   };
 
-  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, drafts, setDrafts, resumeDraft, setResumeDraft, profile, setProfile, auth };
+  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, profile, setProfile, auth };
 
   // screens with the app chrome (sidebar)
   const appScreens = ["home", "create", "vaults", "profile", "settings"];
@@ -877,21 +871,16 @@ function Home({ go, folders }) {
 
 /* ----------------------------- 7. Create flow ----------------------------- */
 
-function Create({ go, categories, setCategories, folders, setFolders, drafts, setDrafts, resumeDraft, setResumeDraft, auth, profile, accountType }) {
-  // If we're reopening a saved draft, start from where it left off; otherwise start fresh.
-  const [stage, setStage] = useState(resumeDraft ? (resumeDraft.stage || 0) : 0);        // 0..8 questions, 9 = output
-  const [answers, setAnswers] = useState(resumeDraft ? (resumeDraft.answers || {}) : {});
-  const [followups, setFollowups] = useState(resumeDraft ? (resumeDraft.followups || {}) : {}); // { groupIndex: [q1, q2] } — AI-generated when live
+function Create({ go, categories, setCategories, folders, setFolders, auth, profile, accountType }) {
+  // step index 0..8 across 9 questions, then "output"
+  const [stage, setStage] = useState(0);        // 0..8 questions, 9 = output
+  const [answers, setAnswers] = useState({});
+  const [followups, setFollowups] = useState({}); // { groupIndex: [q1, q2] } — AI-generated when live
   const [master, setMaster] = useState("");       // the generated master prompt
   const [busy, setBusy] = useState(false);         // calling Claude (followups or master)
   const [aiError, setAiError] = useState("");
   const [showSave, setShowSave] = useState(false);
-  const [showExit, setShowExit] = useState(false); // the "leave this prompt?" choice
   const [copied, setCopied] = useState(false);
-  const draftId = useRef(resumeDraft ? resumeDraft.id : null); // which draft this maps to, if any
-
-  // We've consumed the draft we were asked to resume — clear it so a later fresh "Create" starts blank.
-  useEffect(() => { if (resumeDraft) setResumeDraft(null); }, []);
 
   const sb = auth && auth.sb;
   const live = !!sb;
@@ -911,22 +900,6 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
   const set = (v) => setAnswers((a) => ({ ...a, [cur.key]: v }));
   const allQA = () => flat.map((f) => [f.q, answers[f.key] || ""]);
   const promptText = master || MOCK_PROMPT;
-
-  // Auto-save progress to a draft (debounced) so nothing is lost if the user clicks away
-  // by accident. Only kicks in once there's something typed, and stops once the prompt is generated.
-  useEffect(() => {
-    if (isOutput) return;
-    const hasContent = Object.values(answers).some((v) => v && String(v).trim());
-    if (!hasContent) return;
-    const t = setTimeout(() => {
-      const title = (answers["c0"] || "").trim();
-      const id = draftId.current || ("d" + Date.now());
-      draftId.current = id;
-      const entry = { id, name: title ? title.slice(0, 48) : "Untitled draft", stage, answers, followups, ts: Date.now(), date: "just now" };
-      setDrafts((ds) => [entry, ...ds.filter((d) => d.id !== id)]);
-    }, 1000);
-    return () => clearTimeout(t);
-  }, [answers, stage, followups, isOutput]);
 
   // After answering a core question, generate its two follow-ups (live only, once).
   const advance = async () => {
@@ -955,23 +928,6 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
       setAiError("Couldn't reach Claude — showing a sample prompt. " + e.message);
     }
     setBusy(false);
-  };
-
-  // Save the current progress so the user can finish it later (lives in Vaults → Drafts).
-  const saveDraft = () => {
-    const title = (answers["c0"] || "").trim();
-    const id = draftId.current || ("d" + Date.now());
-    draftId.current = id;
-    const entry = { id, name: title ? title.slice(0, 48) : "Untitled draft", stage, answers, followups, ts: Date.now(), date: "just now" };
-    setDrafts((ds) => [entry, ...ds.filter((d) => d.id !== id)]);
-    setShowExit(false);
-    go("vaults");
-  };
-  // Leave and throw the work away — also removes the auto-saved draft so it doesn't linger.
-  const discardExit = () => {
-    if (draftId.current) setDrafts((ds) => ds.filter((d) => d.id !== draftId.current));
-    setShowExit(false);
-    go("home");
   };
 
   if (isOutput) {
@@ -1005,7 +961,6 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
             onClose={() => setShowSave(false)}
             onSave={(name, cat) => {
               setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", ts: Date.now(), text: promptText }, ...(f[cat] || [])] }));
-              if (draftId.current) setDrafts((ds) => ds.filter((d) => d.id !== draftId.current));
               setShowSave(false);
               go("vaults");
             }}
@@ -1017,8 +972,7 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-8">
-      <PageHead title="Tell us about your project" sub="We'll use your KonText profile + your answers to build your master prompt."
-        right={<Btn variant="ghost" onClick={() => setShowExit(true)}><Icon d={icons.x} className="h-4 w-4" /> Exit</Btn>} />
+      <PageHead title="Tell us about your project" sub="We'll use your KonText profile + your answers to build your master prompt." />
 
       <div className="mb-5">
         {live ? (
@@ -1061,20 +1015,6 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
           <Btn disabled={!val.trim() || busy} onClick={generate}>{busy ? "Thinking…" : "Generate my master prompt"}</Btn>
         )}
       </div>
-
-      {showExit && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/30 px-6" onClick={() => setShowExit(false)}>
-          <Card className="w-full max-w-sm p-6 fade" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-medium mb-1">Leave this prompt?</h2>
-            <p className="text-sm text-muted mb-5">Save it as a draft to finish later, or discard it.</p>
-            <div className="space-y-2">
-              <Btn className="w-full" onClick={saveDraft}>Save as draft</Btn>
-              <Btn variant="danger" className="w-full" onClick={discardExit}>Discard &amp; exit</Btn>
-              <Btn variant="ghost" className="w-full" onClick={() => setShowExit(false)}>Keep editing</Btn>
-            </div>
-          </Card>
-        </div>
-      )}
     </div>
   );
 }
@@ -1122,20 +1062,12 @@ function SaveModal({ categories, setCategories, onClose, onSave }) {
 
 /* ----------------------------- 8. Vaults ----------------------------- */
 
-function Vaults({ go, categories, setCategories, folders, setFolders, drafts, setDrafts, setResumeDraft }) {
+function Vaults({ go, categories, setCategories, folders, setFolders }) {
   const [open, setOpen] = useState(null); // folder name
   const [query, setQuery] = useState("");
   const [newTag, setNewTag] = useState("");
   const [dupe, setDupe] = useState(false);
-  const [openRecent, setOpenRecent] = useState(null); // which recent prompt is expanded
   const tagInputRef = useRef(null);
-
-  // every saved prompt across all folders, newest first — for the Recents section
-  const recents = [];
-  Object.keys(folders || {}).forEach((cat) => (folders[cat] || []).forEach((p, i) => recents.push({ ...p, cat, key: cat + "-" + i })));
-  recents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  const recent = recents.slice(0, 5);
-  const draftList = drafts || [];
 
   const addTag = () => {
     const v = newTag.trim();
@@ -1209,52 +1141,6 @@ function Vaults({ go, categories, setCategories, folders, setFolders, drafts, se
           </button>
         ))}
       </div>
-
-      {/* drafts — unfinished prompts you can come back to */}
-      {draftList.length > 0 && (
-        <div className="mt-8">
-          <h3 className="text-sm font-medium mb-3">Drafts</h3>
-          <div className="space-y-3">
-            {draftList.map((d) => (
-              <Card key={d.id} className="p-4 flex items-center justify-between gap-3 hover:border-brand/40 transition-colors">
-                <button className="text-left min-w-0" onClick={() => { setResumeDraft(d); go("create"); }}>
-                  <div className="text-sm font-medium truncate">{d.name}</div>
-                  <div className="text-xs text-muted mt-0.5">Question {Math.min((d.stage || 0) + 1, 9)} of 9 · {d.date}</div>
-                </button>
-                <div className="flex items-center gap-1 shrink-0 text-muted">
-                  <Btn variant="secondary" className="px-3 py-1.5 text-xs" onClick={() => { setResumeDraft(d); go("create"); }}>Resume</Btn>
-                  <button title="Delete draft" className="p-2 hover:text-danger" onClick={() => setDrafts((ds) => ds.filter((x) => x.id !== d.id))}><Icon d={icons.trash} className="h-4 w-4" /></button>
-                </div>
-              </Card>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* recents — every saved prompt, newest first; click to open and read, click to close */}
-      <div className="mt-8">
-        <h3 className="text-sm font-medium mb-3">Recent prompts</h3>
-        {recent.length === 0 ? (
-          <Card className="p-6 text-sm text-muted text-center">No prompts yet — create your first one.</Card>
-        ) : (
-          <div className="space-y-3">
-            {recent.map((r) => (
-              <Card key={r.key} className="p-4">
-                <button className="flex items-center gap-1.5 text-left w-full" onClick={() => setOpenRecent(openRecent === r.key ? null : r.key)}>
-                  <Icon d={icons.chevron} className={`h-4 w-4 text-muted shrink-0 transition-transform ${openRecent === r.key ? "rotate-90" : ""}`} />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{r.name}</div>
-                    <div className="text-xs text-muted">{r.cat} · {r.date}</div>
-                  </div>
-                </button>
-                {openRecent === r.key
-                  ? <div className="text-sm text-ink mt-3 whitespace-pre-wrap leading-relaxed">{r.text}</div>
-                  : <button onClick={() => setOpenRecent(r.key)} className="block w-full text-left text-sm text-muted mt-2 truncate">{(r.text || "").split("\n")[0]}</button>}
-              </Card>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -1265,7 +1151,6 @@ function FolderView({ name, go, folders, setFolders, onBack }) {
   const [draft, setDraft] = useState("");
   const [confirmIdx, setConfirmIdx] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
-  const [openIdx, setOpenIdx] = useState(null);
   const [note, setNote] = useState("");
 
   const update = (idx, text) => setFolders((f) => ({ ...f, [name]: f[name].map((p, i) => i === idx ? { ...p, text } : p) }));
@@ -1297,19 +1182,10 @@ function FolderView({ name, go, folders, setFolders, onBack }) {
           {items.map((p, idx) => (
             <Card key={idx} className="p-5">
               <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <button className="flex items-center gap-1.5 text-left" onClick={() => setOpenIdx(openIdx === idx ? null : idx)}>
-                    <Icon d={icons.chevron} className={`h-4 w-4 text-muted shrink-0 transition-transform ${openIdx === idx ? "rotate-90" : ""}`} />
-                    <div>
-                      <div className="text-sm font-medium">{p.name}</div>
-                      <div className="text-xs text-muted">{p.date}</div>
-                    </div>
-                  </button>
-                  {editIdx !== idx && (
-                    openIdx === idx
-                      ? <div className="text-sm text-ink mt-3 whitespace-pre-wrap leading-relaxed">{p.text}</div>
-                      : <button onClick={() => setOpenIdx(idx)} className="block w-full text-left text-sm text-muted mt-2 truncate">{p.text.split("\n")[0]}</button>
-                  )}
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{p.name}</div>
+                  <div className="text-xs text-muted mt-0.5">{p.date}</div>
+                  {editIdx !== idx && <div className="text-sm text-muted mt-2 truncate">{p.text.split("\n")[0]}</div>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0 text-muted">
                   <button title="Edit" className="p-1.5 hover:text-brand" onClick={() => { setEditIdx(idx); setDraft(p.text); }}><Icon d={icons.edit} className="h-4 w-4" /></button>
