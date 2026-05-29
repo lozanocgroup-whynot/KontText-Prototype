@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script>
@@ -134,12 +135,12 @@ const icons = {
 
 /* ----------------------------- mock data ----------------------------- */
 
-const MOCK_USER = { name: "Alex Rivera", email: "alex@example.com", type: "Personal" };
-const MOCK_PROMPT = `You are acting as Alex Rivera, a direct and confident communicator with a warm, approachable tone. Alex works in [industry] and is focused on thought leadership and building authentic client relationships.
+// Fallback master prompt, shown only when no API key is connected (generic — no fixed identity).
+const MOCK_PROMPT = `You are acting on behalf of the user described in their KonText profile — matching their voice, tone, and goals.
 
-When writing on Alex's behalf: use clear, concise language — no jargon unless the audience expects it. Lead with the most important point. Keep a conversational but professional register.
+Use clear, direct language and lead with the most important point. Keep the register consistent with how they communicate, and avoid anything that doesn't sound like them.
 
-The goal for this specific task is [goal]. The audience is [audience]. Write as if Alex is speaking directly to them.`;
+The goal for this task is [goal]. The audience is [audience]. Write as if the user is speaking directly to them.`;
 
 const RECENTS = [
   { title: "LinkedIn thought leadership post", cat: "Marketing", date: "2 days ago" },
@@ -183,69 +184,111 @@ const CREATE_FLOW = [
     b: "What do you want them to feel or do after reading this?" },
 ];
 
-/* ----------------------------- AI: config, profile, calls ----------------------------- */
-/* Prototype-only: the Claude API key is read from THIS browser's local storage.
-   In the real build (V2) the key lives on the server (Supabase Edge Functions),
-   never inside the app. Don't share this file with your key saved in it. */
+/* ----------------------------- AI: config ----------------------------- */
+/* The Claude key is NOT here and never in the browser. It lives on your Supabase
+   server (the `claude` Edge Function). The app just asks that function, which talks
+   to Claude. Users never see or enter a key. */
 
 const AI = {
-  endpoint: "https://api.anthropic.com/v1/messages",
-  version: "2023-06-01",
   model_fast: "claude-haiku-4-5-20251001", // quick: adaptive follow-up questions
   model_smart: "claude-sonnet-4-6",        // higher quality: the master prompt
 };
-const LS_KEY = "kontext_claude_key";
 
-function loadKey() { try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; } }
-function saveKey(k) { try { k ? localStorage.setItem(LS_KEY, k) : localStorage.removeItem(LS_KEY); } catch (e) {} }
+/* ----------------------------- Cloud sync (Supabase) ----------------------------- */
+/* The Supabase URL + publishable (anon) key are PUBLIC by design — safe to ship in the
+   browser and in GitHub. Row Level Security makes sure each person only sees their own
+   data. One table `kontext_state` holds one jsonb blob per user — the persisted memory.
 
-// The demo identity behind every prompt (mock profile for the prototype).
-const MOCK_PROFILE = {
-  name: "Alex Rivera",
-  type: "Personal",
-  voice: "Direct, confident, warm",
-  style: "Concise with context when needed",
-  goals: "Thought leadership and client communication",
-  details: [
-    ["Communication style", "Direct, warm, gets to the point"],
-    ["Topics / industries", "SaaS, marketing, founder content"],
-    ["Direction preference", "Brief"],
-    ["Goals with AI", "Sound consistent and save time"],
-    ["Natural tone", "Confident but friendly"],
-    ["Never sound like", "Robotic, salesy, overhyped"],
-  ],
-};
-function profileText(p) {
-  const lines = p.details.map(([k, v]) => `- ${k}: ${v}`).join("\n");
-  return `Name: ${p.name}\nAccount type: ${p.type}\nVoice: ${p.voice}\nStyle: ${p.style}\nGoals: ${p.goals}\nProfile answers:\n${lines}`;
+   FOR THE LIVE/HOSTED SITE: paste your two PUBLIC values on the next two lines. Once both
+   are filled the app connects automatically — no Settings step for visitors. Leave the key
+   blank to instead enter it in Settings (saved only in your own browser). */
+
+const SUPABASE_URL_DEFAULT = "https://vccirheyjtrwesxdoguv.supabase.co"; // your Project URL
+const SUPABASE_KEY_DEFAULT = ""; // paste your sb_publishable_... key here for the hosted site
+
+const LS_SB = "kontext_supabase_cfg";
+function loadCfg() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LS_SB) || "null"); } catch (e) {}
+  if (saved && saved.url && saved.key) return saved;
+  if (SUPABASE_URL_DEFAULT && SUPABASE_KEY_DEFAULT) return { url: SUPABASE_URL_DEFAULT, key: SUPABASE_KEY_DEFAULT };
+  return saved;
+}
+function saveCfg(c) { try { c ? localStorage.setItem(LS_SB, JSON.stringify(c)) : localStorage.removeItem(LS_SB); } catch (e) {} }
+function makeClient(cfg) {
+  if (!cfg || !cfg.url || !cfg.key) return null;
+  if (typeof supabase === "undefined" || !supabase.createClient) return null;
+  try { return supabase.createClient(cfg.url, cfg.key); } catch (e) { return null; }
+}
+async function loadState(sb, userId) {
+  const { data, error } = await sb.from("kontext_state").select("data").eq("user_id", userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? data.data : null;
+}
+async function saveState(sb, userId, blob) {
+  const { error } = await sb.from("kontext_state").upsert({ user_id: userId, data: blob, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
 }
 
-// One small wrapper around the Claude API (browser-direct — prototype only).
-async function callClaude(apiKey, { system, user, model, max_tokens = 1024 }) {
-  const res = await fetch(AI.endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": AI.version,
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({ model, max_tokens, system, messages: [{ role: "user", content: user }] }),
+// Initials for the avatar, from the user's real name.
+function initials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "·";
+  return (parts[0][0] + (parts[1] ? parts[1][0] : "")).toUpperCase();
+}
+
+// Turn the user's REAL profile (account type + onboarding answers) into text for the AI.
+// This is the "memory" — everything the user entered flows through here into every prompt.
+function profileToText(profile, accountType) {
+  const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
+  const ans = (profile && profile.answers) || {};
+  const lines = [];
+  fixed.forEach((f, i) => {
+    const a = ans[i];
+    if (a && String(a).trim()) lines.push(`- ${f.q} → ${a}`);
   });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
-    throw new Error(detail || `Request failed (${res.status})`);
-  }
-  const data = await res.json();
-  return ((data.content && data.content[0] && data.content[0].text) || "").trim();
+  const l2 = (profile && profile.layer2) || {};
+  const l2labels = (profile && profile.l2q) || ADAPTIVE_MOCK;
+  Object.keys(l2).forEach((k) => {
+    const v = l2[k];
+    if (v && String(v).trim()) {
+      const qi = parseInt(String(k).replace("a", ""), 10);
+      const q = l2labels[qi] || "Follow-up";
+      lines.push(`- ${q} → ${v}`);
+    }
+  });
+  const name = (profile && profile.name) || "(not provided)";
+  const header = `Name: ${name}\nAccount type: ${accountType}`;
+  return lines.length
+    ? `${header}\nProfile answers:\n${lines.join("\n")}`
+    : `${header}\n(No profile answers captured yet — keep the output general.)`;
 }
 
-// Generate exactly two adaptive follow-up questions for one core question.
-async function genFollowups(apiKey, coreQ, answer) {
+// Ask Claude through your Supabase Edge Function (the key stays on the server).
+async function callClaude(sb, { system, user, model, max_tokens = 1024 }) {
+  if (!sb) throw new Error("Not connected to your KonText server yet.");
+  const { data, error } = await sb.functions.invoke("claude", { body: { system, user, model, max_tokens } });
+  if (error) throw new Error(error.message || "AI request failed");
+  if (data && data.error) throw new Error(data.error);
+  return ((data && data.text) || "").trim();
+}
+
+// Generate adaptive onboarding follow-ups from the user's first-round answers.
+async function genOnboarding(sb, layer1Str) {
+  const system = "You are KonText, building a person's identity profile. Given their first-round answers, write 5 short, specific follow-up questions that go deeper into their voice, style, goals, and how they want AI to represent them. Each question is one sentence, written directly to them. Return ONLY a JSON array of strings — no other text, no markdown.";
+  const raw = await callClaude(sb, { system, user: layer1Str, model: AI.model_fast, max_tokens: 500 });
+  let arr;
+  try { arr = JSON.parse(raw); }
+  catch (e) { const m = raw.match(/\[[\s\S]*\]/); arr = m ? JSON.parse(m[0]) : null; }
+  if (!Array.isArray(arr) || arr.length < 1) throw new Error("Could not read the questions");
+  return arr.slice(0, 6).map(String);
+}
+
+// Generate exactly two adaptive follow-up questions for one core project question.
+async function genFollowups(sb, profileStr, coreQ, answer) {
   const system = "You are KonText, an engine that personalizes AI for a specific person. Given their identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper so the final output is sharper. Each question is one sentence. Return ONLY a JSON array of two strings — no other text, no markdown.";
-  const user = `${profileText(MOCK_PROFILE)}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
-  const raw = await callClaude(apiKey, { system, user, model: AI.model_fast, max_tokens: 300 });
+  const user = `${profileStr}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
+  const raw = await callClaude(sb, { system, user, model: AI.model_fast, max_tokens: 300 });
   let arr;
   try { arr = JSON.parse(raw); }
   catch (e) { const m = raw.match(/\[[\s\S]*\]/); arr = m ? JSON.parse(m[0]) : null; }
@@ -253,12 +296,12 @@ async function genFollowups(apiKey, coreQ, answer) {
   return [String(arr[0]), String(arr[1])];
 }
 
-// Build the final master prompt from all 9 answers.
-async function genMasterPrompt(apiKey, qa) {
+// Build the final master prompt from the profile + all project answers.
+async function genMasterPrompt(sb, profileStr, qa) {
   const system = "You are KonText. Turn a person's identity profile plus their project answers into a single clean 'master prompt' they can paste into ChatGPT, Claude, or Gemini. Write it as direct instructions to an AI in second person (e.g. \"You are acting as...\"). Capture their voice, style, and goals, then the specific project, goal, and audience. Output ONLY the master prompt — no preamble, no explanation, no markdown headings. Keep it tight: 2 to 4 short paragraphs.";
   const body = qa.map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n");
-  const user = `${profileText(MOCK_PROFILE)}\n\nProject answers:\n${body}`;
-  return callClaude(apiKey, { system, user, model: AI.model_smart, max_tokens: 700 });
+  const user = `${profileStr}\n\nProject answers:\n${body}`;
+  return callClaude(sb, { system, user, model: AI.model_smart, max_tokens: 700 });
 }
 
 /* ============================================================ APP */
@@ -266,8 +309,8 @@ async function genMasterPrompt(apiKey, qa) {
 function App() {
   const [screen, setScreen] = useState("landing");
   const [accountType, setAccountType] = useState("Personal");
-  const [apiKey, setApiKeyState] = useState(loadKey());
-  const setApiKey = (k) => { saveKey(k); setApiKeyState(k); };
+  // The user's living memory: name/email from signup + onboarding answers. Empty until they sign up.
+  const [profile, setProfile] = useState({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
 
   // vault state shared between Vaults + create flow
   const [categories, setCategories] = useState(["Marketing", "Client Emails", "Social Media", "Internal Comms"]);
@@ -281,9 +324,70 @@ function App() {
     "Internal Comms": [],
   });
 
+  // --- Cloud sync (Supabase) ---
+  const [sbCfg, setSbCfg] = useState(loadCfg());
+  const sbRef = useRef(makeClient(loadCfg()));
+  const sb = sbRef.current;
+  const [user, setUser] = useState(null);
+  const [cloudMsg, setCloudMsg] = useState("");
+  const hydrating = useRef(false);
+  const saveTimer = useRef(null);
+
   const go = (s) => { setScreen(s); window.scrollTo(0, 0); };
 
-  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, apiKey, setApiKey };
+  const configureCloud = (cfg) => { saveCfg(cfg); setSbCfg(cfg); sbRef.current = makeClient(cfg); };
+
+  const hydrate = async (u) => {
+    hydrating.current = true;
+    try {
+      const blob = await loadState(sb, u.id);
+      if (blob) {
+        if (blob.accountType) setAccountType(blob.accountType);
+        if (blob.profile) setProfile(blob.profile);
+        if (blob.categories) setCategories(blob.categories);
+        if (blob.folders) setFolders(blob.folders);
+      }
+    } catch (e) { setCloudMsg("Couldn't load your saved data: " + e.message); }
+    setTimeout(() => { hydrating.current = false; }, 0);
+  };
+
+  // Restore an existing session on load.
+  useEffect(() => {
+    if (!sb) return;
+    sb.auth.getSession().then(async ({ data }) => {
+      const u = data && data.session ? data.session.user : null;
+      if (u) { setUser(u); await hydrate(u); go("home"); }
+    });
+  }, []);
+
+  // Autosave to the cloud (debounced) whenever the memory changes while logged in.
+  useEffect(() => {
+    if (!sb || !user || hydrating.current) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      saveState(sb, user.id, { accountType, profile, categories, folders }).catch((e) => setCloudMsg("Save failed: " + e.message));
+    }, 800);
+  }, [accountType, profile, categories, folders, user]);
+
+  const auth = {
+    sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
+    signUp: async (email, password, name) => {
+      if (!sb) return { ok: true, local: true };
+      const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
+      if (error) return { ok: false, error: error.message };
+      if (data.session) { setUser(data.user); return { ok: true }; }
+      return { ok: true, confirm: true };
+    },
+    signIn: async (email, password) => {
+      if (!sb) return { ok: true, local: true };
+      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) return { ok: false, error: error.message };
+      setUser(data.user); await hydrate(data.user); return { ok: true };
+    },
+    signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); },
+  };
+
+  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, profile, setProfile, auth };
 
   // screens with the app chrome (sidebar)
   const appScreens = ["home", "create", "vaults", "profile", "settings"];
@@ -291,8 +395,8 @@ function App() {
 
   let view;
   if (screen === "landing") view = <Landing go={go} />;
-  else if (screen === "signup") view = <Signup go={go} />;
-  else if (screen === "login") view = <Login go={go} />;
+  else if (screen === "signup") view = <Signup go={go} setProfile={setProfile} auth={auth} />;
+  else if (screen === "login") view = <Login go={go} auth={auth} />;
   else if (screen === "accountType") view = <AccountType {...ctx} />;
   else if (screen === "wizard") view = <Wizard {...ctx} />;
   else if (inApp) view = <Shell {...ctx} />;
@@ -396,17 +500,45 @@ function AuthWrap({ children }) {
   );
 }
 
-function Signup({ go }) {
+function Signup({ go, setProfile, auth }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const cloud = !!(auth && auth.sb);
+
+  const submit = async () => {
+    setErr("");
+    if (cloud) {
+      if (password.length < 6) { setErr("Password must be at least 6 characters."); return; }
+      if (password !== confirm) { setErr("Passwords don't match."); return; }
+      setBusy(true);
+      const r = await auth.signUp(email.trim(), password, name.trim());
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || "Couldn't create account."); return; }
+      setProfile((p) => ({ ...p, name: name.trim(), email: email.trim() }));
+      if (r.confirm) { setErr("Account created — check your email to confirm, then log in."); return; }
+      go("accountType");
+      return;
+    }
+    setProfile((p) => ({ ...p, name: name.trim(), email: email.trim() }));
+    go("accountType");
+  };
+
   return (
     <AuthWrap>
       <div className="text-center mb-6"><Logo /></div>
       <h1 className="text-xl font-medium text-center mb-6">Create your account</h1>
       <div className="space-y-4">
-        <Field label="Full name" placeholder="Alex Rivera" />
-        <Field label="Email address" placeholder="you@example.com" />
-        <Field label="Password" type="password" placeholder="••••••••" />
-        <Field label="Confirm password" type="password" placeholder="••••••••" />
-        <Btn className="w-full" onClick={() => go("accountType")}>Create Account</Btn>
+        <Field label="Full name" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
+        <Field label="Email address" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Field label="Password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <Field label="Confirm password" type="password" placeholder="••••••••" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        {err && <p className="text-xs text-danger">{err}</p>}
+        <Btn className="w-full" disabled={!name.trim() || busy} onClick={submit}>{busy ? "Creating…" : "Create Account"}</Btn>
       </div>
       <p className="mt-5 text-center text-sm text-muted">
         Already have an account? <button className="text-brand font-medium" onClick={() => go("login")}>Log in</button>
@@ -415,15 +547,36 @@ function Signup({ go }) {
   );
 }
 
-function Login({ go }) {
+function Login({ go, auth }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const cloud = !!(auth && auth.sb);
+
+  const submit = async () => {
+    setErr("");
+    if (cloud) {
+      setBusy(true);
+      const r = await auth.signIn(email.trim(), password);
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || "Couldn't log in."); return; }
+      go("home");
+      return;
+    }
+    go("home");
+  };
+
   return (
     <AuthWrap>
       <div className="text-center mb-6"><Logo /></div>
       <h1 className="text-xl font-medium text-center mb-6">Welcome back</h1>
       <div className="space-y-4">
-        <Field label="Email address" placeholder="you@example.com" />
-        <Field label="Password" type="password" placeholder="••••••••" />
-        <Btn className="w-full" onClick={() => go("home")}>Log In</Btn>
+        <Field label="Email address" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Field label="Password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {err && <p className="text-xs text-danger">{err}</p>}
+        <Btn className="w-full" disabled={busy} onClick={submit}>{busy ? "Logging in…" : "Log In"}</Btn>
       </div>
       <p className="mt-5 text-center text-sm text-muted">
         Don't have an account? <button className="text-brand font-medium" onClick={() => go("signup")}>Sign up</button>
@@ -467,16 +620,44 @@ function AccountType({ go, accountType, setAccountType }) {
 
 /* ----------------------------- 5. Wizard ----------------------------- */
 
-function Wizard({ go, accountType }) {
+function Wizard({ go, accountType, auth, setProfile }) {
+  const sb = auth && auth.sb;
   const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
   const [answers, setAnswers] = useState({});
   const [layer2, setLayer2] = useState(false);
+  const [l2q, setL2q] = useState(ADAPTIVE_MOCK); // onboarding follow-ups (AI-generated when live)
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
-  const total = fixed.length + ADAPTIVE_MOCK.length;
+  const total = fixed.length + l2q.length;
   const done = Object.values(answers).filter((v) => v && String(v).trim()).length;
   const pct = Math.round((done / total) * 100);
 
   const set = (k, v) => setAnswers((a) => ({ ...a, [k]: v }));
+
+  // Identity text from the fixed answers, used to generate the adaptive follow-ups.
+  const layer1Text = () => {
+    const lines = fixed.map((f, i) => (answers[i] && String(answers[i]).trim()) ? `- ${f.q} → ${answers[i]}` : null).filter(Boolean);
+    return `Account type: ${accountType}\nFirst answers:\n${lines.join("\n")}`;
+  };
+
+  const toLayer2 = async () => {
+    setErr("");
+    if (sb) {
+      setBusy(true);
+      try { setL2q(await genOnboarding(sb, layer1Text())); }
+      catch (e) { setErr("Couldn't reach the AI — showing sample questions. " + e.message); }
+      setBusy(false);
+    }
+    setLayer2(true);
+  };
+
+  const complete = () => {
+    const l1 = {}; const l2 = {};
+    Object.keys(answers).forEach((k) => { if (String(k).startsWith("a")) l2[k] = answers[k]; else l1[k] = answers[k]; });
+    setProfile((p) => ({ ...p, answers: l1, layer2: l2, l2q }));
+    go("home");
+  };
 
   return (
     <div className="min-h-full">
@@ -524,15 +705,17 @@ function Wizard({ go, accountType }) {
 
         {!layer2 ? (
           <div className="mt-6">
-            <Btn className="w-full py-3" onClick={() => { setLayer2(true); }}>Continue to next step</Btn>
+            {err && <p className="text-xs text-danger mb-2">{err}</p>}
+            <Btn className="w-full py-3" disabled={busy} onClick={toLayer2}>{busy ? "Thinking…" : "Continue to next step"}</Btn>
           </div>
         ) : (
           <div className="mt-10 fade">
             <div className="label text-brand mb-1">Layer 2</div>
             <h2 className="text-lg font-medium mb-1">Based on what you shared, a few more questions</h2>
-            <p className="text-sm text-muted mb-5">In step 2 these adapt to your real answers. For now they're samples.</p>
+            <p className="text-sm text-muted mb-5">{sb ? "These were written from your answers above." : "Connect your cloud in Settings to make these adapt to your real answers. For now they're samples."}</p>
+            {err && <p className="text-xs text-danger mb-3">{err}</p>}
             <div className="space-y-5">
-              {ADAPTIVE_MOCK.map((q, i) => (
+              {l2q.map((q, i) => (
                 <Card key={i} className="p-5 fade">
                   <div className="text-sm font-medium mb-3">{q}</div>
                   <Field placeholder="Type your answer…" value={answers["a" + i] || ""} onChange={(e) => set("a" + i, e.target.value)} />
@@ -540,7 +723,7 @@ function Wizard({ go, accountType }) {
               ))}
             </div>
             <div className="mt-6">
-              <Btn className="w-full py-3" onClick={() => go("home")}>Complete my profile</Btn>
+              <Btn className="w-full py-3" onClick={complete}>Complete my profile</Btn>
             </div>
           </div>
         )}
@@ -553,7 +736,7 @@ function Wizard({ go, accountType }) {
 /* ----------------------------- App Shell (sidebar) ----------------------------- */
 
 function Shell(props) {
-  const { screen, go } = props;
+  const { screen, go, profile, accountType } = props;
   const nav = [
     { key: "home", label: "Home", icon: icons.home },
     { key: "vaults", label: "Vaults", icon: icons.vault },
@@ -583,10 +766,10 @@ function Shell(props) {
           ))}
         </nav>
         <div className="mt-auto flex items-center gap-3 border-t border-line pt-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-tint text-sm font-medium text-brand">AR</div>
-          <div className="leading-tight">
-            <div className="text-sm font-medium">{MOCK_USER.name}</div>
-            <div className="text-xs text-muted">{MOCK_USER.type}</div>
+          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-tint text-sm font-medium text-brand">{initials(profile.name)}</div>
+          <div className="leading-tight min-w-0">
+            <div className="text-sm font-medium truncate">{profile.name || "Your account"}</div>
+            <div className="text-xs text-muted">{accountType}</div>
           </div>
         </div>
       </aside>
@@ -669,7 +852,7 @@ function Home({ go }) {
 
 /* ----------------------------- 7. Create flow ----------------------------- */
 
-function Create({ go, categories, setCategories, folders, setFolders, apiKey }) {
+function Create({ go, categories, setCategories, folders, setFolders, auth, profile, accountType }) {
   // step index 0..8 across 9 questions, then "output"
   const [stage, setStage] = useState(0);        // 0..8 questions, 9 = output
   const [answers, setAnswers] = useState({});
@@ -680,7 +863,9 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey }) 
   const [showSave, setShowSave] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const live = !!apiKey;
+  const sb = auth && auth.sb;
+  const live = !!sb;
+  const profileStr = profileToText(profile, accountType); // the user's memory, fed into every call
 
   // build linear list of 9 questions; adaptive text is AI-generated when live, sample otherwise
   const flat = [];
@@ -703,7 +888,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey }) 
     if (live && cur.kind === "core" && !followups[cur.group]) {
       setBusy(true);
       try {
-        const fups = await genFollowups(apiKey, cur.q, val);
+        const fups = await genFollowups(sb, profileStr, cur.q, val);
         setFollowups((f) => ({ ...f, [cur.group]: fups }));
       } catch (e) {
         setAiError("Couldn't reach Claude — using a sample follow-up. " + e.message);
@@ -718,7 +903,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey }) 
     if (!live) { setMaster(MOCK_PROMPT); return; }
     setBusy(true); setAiError("");
     try {
-      setMaster(await genMasterPrompt(apiKey, allQA()));
+      setMaster(await genMasterPrompt(sb, profileStr, allQA()));
     } catch (e) {
       setMaster(MOCK_PROMPT);
       setAiError("Couldn't reach Claude — showing a sample prompt. " + e.message);
@@ -778,7 +963,7 @@ function Create({ go, categories, setCategories, folders, setFolders, apiKey }) 
         ) : (
           <span className="inline-flex items-center gap-2 text-xs text-muted">
             Sample mode — follow-ups are examples.
-            <button className="text-brand font-medium" onClick={() => go("settings")}>Connect Claude</button>
+            <button className="text-brand font-medium" onClick={() => go("settings")}>Connect cloud</button>
           </span>
         )}
       </div>
@@ -1006,109 +1191,109 @@ function FolderView({ name, folders, setFolders, onBack }) {
 
 /* ----------------------------- 9. Profile ----------------------------- */
 
-function Profile({ accountType }) {
-  const traits = [
-    ["Voice", "Direct, confident, warm"],
-    ["Style", "Concise with context when needed"],
-    ["Goals", "Thought leadership and client communication"],
-  ];
+function Profile({ accountType, profile, setProfile }) {
   const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
-  const sample = [
-    "Direct, warm, gets to the point",
-    "SaaS, marketing, founder content",
-    "Brief",
-    "Sound consistent and save time",
-    "Confident but friendly",
-    "Robotic, salesy, overhyped",
-  ];
-  const [fields, setFields] = useState(fixed.map((f, i) => ({ label: f.q, value: sample[i] || "—" })));
+  const ans = profile.answers || {};
+  const fields = fixed.map((f, i) => ({
+    key: i,
+    label: f.q,
+    value: (ans[i] != null && String(ans[i]).trim()) ? String(ans[i]) : "—",
+  }));
+  const filled = fields.filter((f) => f.value !== "—");
+  const traits = filled.slice(0, 3);
+
   const [editIdx, setEditIdx] = useState(null);
   const [draft, setDraft] = useState("");
+  const saveField = (i) => {
+    setProfile((p) => ({ ...p, answers: { ...(p.answers || {}), [i]: draft } }));
+    setEditIdx(null);
+  };
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
       <Card className="p-7 mb-8">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-4">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand">AR</div>
-            <div>
-              <div className="text-lg font-medium">{MOCK_USER.name}</div>
-              <div className="text-sm text-muted">{MOCK_USER.email}</div>
-              <div className="mt-2"><Badge>{accountType}</Badge></div>
-            </div>
+        <div className="flex items-center gap-4">
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand">{initials(profile.name)}</div>
+          <div className="min-w-0">
+            <div className="text-lg font-medium">{profile.name || "—"}</div>
+            <div className="text-sm text-muted">{profile.email || "—"}</div>
+            <div className="mt-2"><Badge>{accountType}</Badge></div>
           </div>
-          <Btn variant="secondary">Edit profile</Btn>
         </div>
-        <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-line pt-5">
-          {traits.map(([k, v]) => (
-            <div key={k}>
-              <div className="label text-muted mb-1">{k}</div>
-              <div className="text-sm">{v}</div>
-            </div>
-          ))}
-        </div>
+        {traits.length > 0 && (
+          <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-line pt-5">
+            {traits.map((t) => (
+              <div key={t.key}>
+                <div className="label text-muted mb-1">{t.label}</div>
+                <div className="text-sm">{t.value}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       <h2 className="text-lg font-medium">Your KonText Profile</h2>
-      <p className="text-sm text-muted mt-1 mb-5">These answers shape every master prompt KonText builds for you.</p>
-      <div className="space-y-3">
-        {fields.map((f, i) => (
-          <Card key={i} className="p-4">
-            <div className="label text-muted mb-1.5">{f.label}</div>
-            {editIdx === i ? (
-              <div className="fade">
-                <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
-                <div className="mt-2 flex gap-2">
-                  <Btn onClick={() => { setFields((fs) => fs.map((x, j) => j === i ? { ...x, value: draft } : x)); setEditIdx(null); }}>Save</Btn>
-                  <Btn variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Btn>
+      <p className="text-sm text-muted mt-1 mb-5">These answers shape every master prompt KonText builds for you. Edit any of them and it updates your memory.</p>
+      {filled.length === 0 ? (
+        <Card className="p-6 text-sm text-muted">No profile answers yet. Complete onboarding to build your identity.</Card>
+      ) : (
+        <div className="space-y-3">
+          {fields.map((f, i) => (
+            <Card key={i} className="p-4">
+              <div className="label text-muted mb-1.5">{f.label}</div>
+              {editIdx === i ? (
+                <div className="fade">
+                  <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
+                  <div className="mt-2 flex gap-2">
+                    <Btn onClick={() => saveField(i)}>Save</Btn>
+                    <Btn variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Btn>
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <button className="text-left w-full text-sm hover:text-brand" onClick={() => { setEditIdx(i); setDraft(f.value); }}>
-                {f.value}
-              </button>
-            )}
-          </Card>
-        ))}
-      </div>
+              ) : (
+                <button className="text-left w-full text-sm hover:text-brand" onClick={() => { setEditIdx(i); setDraft(f.value === "—" ? "" : f.value); }}>
+                  {f.value}
+                </button>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 /* ----------------------------- 10. Settings ----------------------------- */
 
-function KeyEditor({ apiKey, setApiKey }) {
-  const [draft, setDraft] = useState(apiKey || "");
-  const [status, setStatus] = useState(""); // "", "testing", "ok", "fail"
+function CloudEditor({ auth }) {
+  const cfg = auth.sbCfg || {};
+  const [url, setUrl] = useState(cfg.url || "");
+  const [key, setKey] = useState(cfg.key || "");
   const [msg, setMsg] = useState("");
+  const [bad, setBad] = useState(false);
 
-  const test = async () => {
-    setStatus("testing"); setMsg("");
+  const testAI = async () => {
+    setBad(false); setMsg("Testing the AI server…");
     try {
-      await callClaude(draft.trim(), { system: "Reply with the single word: ok", user: "ok", model: AI.model_fast, max_tokens: 5 });
-      setApiKey(draft.trim());
-      setStatus("ok"); setMsg("Working — you're connected.");
-    } catch (e) {
-      setStatus("fail"); setMsg((e.message || "Couldn't connect.") + " (Check the key and that your Console has credit.)");
-    }
+      const r = await callClaude(auth.sb, { system: "Reply with the single word: ok", user: "ok", model: AI.model_fast, max_tokens: 5 });
+      setMsg("AI server is working. Reply: " + r);
+    } catch (e) { setBad(true); setMsg("AI test failed: " + e.message); }
   };
 
   return (
     <div>
-      <div className="flex gap-2 items-end">
-        <div className="flex-1"><Field label="Claude API key" type="password" placeholder="sk-ant-..." value={draft} onChange={(e) => { setDraft(e.target.value); setStatus(""); setMsg(""); }} /></div>
-        <Btn variant="secondary" disabled={!draft.trim()} onClick={() => { setApiKey(draft.trim()); setStatus("ok"); setMsg("Saved."); }}>Save</Btn>
+      <Field label="Supabase project URL" placeholder="https://xxxx.supabase.co" value={url} onChange={(e) => setUrl(e.target.value)} />
+      <div className="mt-3"><Field label="Supabase publishable (anon) key" type="password" placeholder="sb_publishable_..." value={key} onChange={(e) => setKey(e.target.value)} /></div>
+      <div className="mt-3 flex items-center gap-4 flex-wrap">
+        <Btn variant="secondary" disabled={!url.trim() || !key.trim()} onClick={() => { setBad(false); auth.configureCloud({ url: url.trim(), key: key.trim() }); setMsg("Saved. Reload the page to connect, then sign up or log in."); }}>Save</Btn>
+        {auth.sb && <Btn variant="ghost" onClick={testAI}>Test AI server</Btn>}
+        {auth.sbCfg && <button className="text-xs text-danger" onClick={() => { auth.configureCloud(null); setUrl(""); setKey(""); setMsg("Disconnected. Reload the page."); }}>Disconnect</button>}
       </div>
-      <div className="mt-3 flex items-center gap-4">
-        <Btn variant="ghost" disabled={!draft.trim() || status === "testing"} onClick={test}>{status === "testing" ? "Testing…" : "Test connection"}</Btn>
-        {apiKey && <button className="text-xs text-danger" onClick={() => { setApiKey(""); setDraft(""); setStatus(""); setMsg("Disconnected."); }}>Remove key</button>}
-      </div>
-      {msg && <p className={`mt-2 text-xs ${status === "fail" ? "text-danger" : "text-ok"}`}>{msg}</p>}
+      {msg && <p className={`mt-2 text-xs ${bad ? "text-danger" : "text-ok"}`}>{msg}</p>}
     </div>
   );
 }
 
-function Settings({ go, apiKey, setApiKey }) {
+function Settings({ go, profile, auth }) {
   const [emailNotif, setEmailNotif] = useState(true);
   const [weekly, setWeekly] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -1127,24 +1312,26 @@ function Settings({ go, apiKey, setApiKey }) {
       <PageHead title="Settings" />
 
       <Card className="p-6 mb-5">
-        <div className="label text-muted mb-3">AI connection</div>
+        <div className="label text-muted mb-3">Cloud sync</div>
         <div className="flex items-center gap-2 mb-3">
-          <span className={`h-2 w-2 rounded-full ${apiKey ? "bg-ok" : "bg-line"}`} />
-          <span className="text-sm font-medium">{apiKey ? "Connected to Claude" : "Not connected"}</span>
+          <span className={`h-2 w-2 rounded-full ${auth.user ? "bg-ok" : auth.sbCfg ? "bg-brand" : "bg-line"}`} />
+          <span className="text-sm font-medium">
+            {auth.user ? `Signed in as ${auth.user.email}` : auth.sbCfg ? "Connected — sign up or log in to save" : "Not connected"}
+          </span>
         </div>
         <p className="text-sm text-muted mb-4 leading-relaxed">
-          Paste your Claude API key to make the Create flow generate real adaptive questions and master prompts.
-          Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-brand">console.anthropic.com</a>.
-          The key stays in this browser only — don't share this file with your key saved in it.
+          Connect a free Supabase project so your profile and vault are saved to a real account and follow you across devices.
+          Use the <strong>anon (public)</strong> key — never the secret key. Setup steps are in SUPABASE-SETUP.md.
         </p>
-        <KeyEditor apiKey={apiKey} setApiKey={setApiKey} />
+        <CloudEditor auth={auth} />
+        {auth.cloudMsg && <p className="mt-2 text-xs text-danger">{auth.cloudMsg}</p>}
       </Card>
 
       <Card className="p-6 mb-5">
         <div className="label text-muted mb-4">Account</div>
         <div className="space-y-4">
           <div className="flex gap-2 items-end">
-            <div className="flex-1"><Field label="Change email" defaultValue={MOCK_USER.email} /></div>
+            <div className="flex-1"><Field label="Change email" defaultValue={profile.email || ""} placeholder="you@example.com" /></div>
             <Btn variant="secondary">Save</Btn>
           </div>
           <div className="flex gap-2 items-end">
@@ -1186,7 +1373,7 @@ function Settings({ go, apiKey, setApiKey }) {
         )}
       </Card>
 
-      <Btn variant="secondary" className="w-full" onClick={() => go("landing")}>Log out</Btn>
+      <Btn variant="secondary" className="w-full" onClick={async () => { await auth.signOut(); go("landing"); }}>Log out</Btn>
     </div>
   );
 }
