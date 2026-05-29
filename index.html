@@ -328,18 +328,33 @@ function App() {
 
   const hasProfile = (blob) => !!(blob && blob.profile && blob.profile.answers && Object.keys(blob.profile.answers).length > 0);
 
+  const emptyProfile = () => ({ name: "", email: "", answers: {}, layer2: {}, l2q: ADAPTIVE_MOCK });
+
+  // Wipe all per-user data back to defaults. Used on sign out / sign up so one
+  // account's data can never linger into another account's session.
+  const resetUserData = () => {
+    setAccountType("Personal");
+    setProfile(emptyProfile());
+    setCategories([]);
+    setFolders({});
+    setDrafts([]);
+    setResumeDraft(null);
+  };
+
   const hydrate = async (u) => {
     hydrating.current = true;
     let blob = null;
     try {
       blob = await loadState(sb, u.id);
-      if (blob) {
-        if (blob.accountType) setAccountType(blob.accountType);
-        if (blob.profile) setProfile(blob.profile);
-        if (blob.categories) setCategories(blob.categories);
-        if (blob.folders) setFolders(blob.folders);
-        if (blob.drafts) setDrafts(blob.drafts);
-      }
+      // Always start from a clean slate, then apply ONLY this user's saved data.
+      // If the user has no saved field, it resets to default — never inherits the
+      // previous account's data (which would otherwise get autosaved into this row).
+      setAccountType((blob && blob.accountType) || "Personal");
+      setProfile((blob && blob.profile) || emptyProfile());
+      setCategories((blob && blob.categories) || []);
+      setFolders((blob && blob.folders) || {});
+      setDrafts((blob && blob.drafts) || []);
+      setResumeDraft(null);
     } catch (e) { setCloudMsg("Couldn't load your saved data: " + e.message); }
     setTimeout(() => { hydrating.current = false; }, 0);
     return blob;
@@ -366,6 +381,7 @@ function App() {
   const auth = {
     sb, user, cloudMsg, setCloudMsg, sbCfg, configureCloud,
     signUp: async (email, password, name) => {
+      resetUserData(); // new account starts clean — never inherits a prior session's data
       if (!sb) return { ok: true, local: true };
       const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
       if (error) return { ok: false, error: error.message };
@@ -378,7 +394,7 @@ function App() {
       if (error) return { ok: false, error: error.message };
       setUser(data.user); const blob = await hydrate(data.user); return { ok: true, hasProfile: hasProfile(blob) };
     },
-    signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); },
+    signOut: async () => { if (sb) { try { await sb.auth.signOut(); } catch (e) {} } setUser(null); resetUserData(); },
   };
 
   const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, drafts, setDrafts, resumeDraft, setResumeDraft, profile, setProfile, auth };
@@ -896,6 +912,22 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
   const allQA = () => flat.map((f) => [f.q, answers[f.key] || ""]);
   const promptText = master || MOCK_PROMPT;
 
+  // Auto-save progress to a draft (debounced) so nothing is lost if the user clicks away
+  // by accident. Only kicks in once there's something typed, and stops once the prompt is generated.
+  useEffect(() => {
+    if (isOutput) return;
+    const hasContent = Object.values(answers).some((v) => v && String(v).trim());
+    if (!hasContent) return;
+    const t = setTimeout(() => {
+      const title = (answers["c0"] || "").trim();
+      const id = draftId.current || ("d" + Date.now());
+      draftId.current = id;
+      const entry = { id, name: title ? title.slice(0, 48) : "Untitled draft", stage, answers, followups, ts: Date.now(), date: "just now" };
+      setDrafts((ds) => [entry, ...ds.filter((d) => d.id !== id)]);
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [answers, stage, followups, isOutput]);
+
   // After answering a core question, generate its two follow-ups (live only, once).
   const advance = async () => {
     setAiError("");
@@ -935,8 +967,12 @@ function Create({ go, categories, setCategories, folders, setFolders, drafts, se
     setShowExit(false);
     go("vaults");
   };
-  // Leave without saving anything.
-  const discardExit = () => { setShowExit(false); go("home"); };
+  // Leave and throw the work away — also removes the auto-saved draft so it doesn't linger.
+  const discardExit = () => {
+    if (draftId.current) setDrafts((ds) => ds.filter((d) => d.id !== draftId.current));
+    setShowExit(false);
+    go("home");
+  };
 
   if (isOutput) {
     return (
