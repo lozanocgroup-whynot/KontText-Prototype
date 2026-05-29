@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KonText — Prototype</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: '#7F77DD',
+          branddark: '#534AB7',
+          tint: '#F5F4FF',
+          ink: '#1A1A2E',
+          muted: '#6B6B8A',
+          line: '#E8E6F8',
+          ok: '#1D9E75',
+          danger: '#E24B4A',
+          tagbg: '#EEEDFE',
+          tagink: '#3C3489',
+        },
+        fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+      },
+    },
+  };
+</script>
+<style>
+  html, body, #root { height: 100%; }
+  body { font-family: 'Inter', system-ui, sans-serif; color: #1A1A2E; background: #F5F4FF; margin: 0; }
+  * { -webkit-font-smoothing: antialiased; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 500; }
+  input, textarea, select { font-family: inherit; }
+  textarea { resize: vertical; }
+  ::placeholder { color: #9d9db3; }
+  .fade { animation: fade .25s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useRef, useEffect } = React;
+
+/* ----------------------------- shared bits ----------------------------- */
+
+function Logo({ size = "text-xl" }) {
+  return (
+    <div className={`${size} font-semibold tracking-tight select-none`}>
+      <span className="text-ink">Kon</span><span className="text-brand">Text</span>
+    </div>
+  );
+}
+
+function Btn({ children, variant = "primary", className = "", disabled, ...rest }) {
+  const base = "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors";
+  const styles = {
+    primary: "bg-brand text-white hover:bg-branddark disabled:opacity-40 disabled:cursor-not-allowed",
+    secondary: "bg-white text-brand border border-brand hover:bg-tint disabled:opacity-40",
+    ghost: "text-muted hover:text-ink hover:bg-tint",
+    danger: "bg-white text-danger border border-danger hover:bg-red-50",
+  };
+  return (
+    <button disabled={disabled} className={`${base} ${styles[variant]} ${className}`} {...rest}>
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, ...rest }) {
+  return (
+    <label className="block">
+      {label && <span className="label text-muted block mb-1.5">{label}</span>}
+      <input
+        className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand"
+        {...rest}
+      />
+    </label>
+  );
+}
+
+function TextArea({ label, rows = 3, ...rest }) {
+  return (
+    <label className="block">
+      {label && <span className="label text-muted block mb-1.5">{label}</span>}
+      <textarea
+        rows={rows}
+        className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand"
+        {...rest}
+      />
+    </label>
+  );
+}
+
+function Card({ children, className = "" }) {
+  return <div className={`rounded-xl border border-line bg-white ${className}`}>{children}</div>;
+}
+
+function Badge({ children }) {
+  return <span className="inline-block rounded-full bg-brand px-2.5 py-1 text-[11px] font-medium text-white">{children}</span>;
+}
+
+/* tiny inline icons (stroke) */
+const Icon = ({ d, className = "h-5 w-5", fill = "none" }) => (
+  <svg viewBox="0 0 24 24" className={className} fill={fill} stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    {Array.isArray(d) ? d.map((p, i) => <path key={i} d={p} />) : <path d={d} />}
+  </svg>
+);
+const icons = {
+  home: "M3 11.5 12 4l9 7.5M5 10v10h5v-6h4v6h5V10",
+  vault: ["M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z", "M4 9h16"],
+  profile: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M5 20a7 7 0 0 1 14 0"],
+  settings: ["M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 5.3 14H5a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 7 7.6l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 12 5.3V5a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"],
+  copy: ["M9 9h10v10H9z", "M5 15V5h10"],
+  plus: "M12 5v14M5 12h14",
+  folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M21 21l-4.3-4.3"],
+  edit: "M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3",
+  share: ["M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"],
+  download: ["M12 4v12", "M8 12l4 4 4-4", "M4 20h16"],
+  trash: ["M4 7h16", "M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2", "M6 7l1 13h10l1-13"],
+  back: "M15 18l-6-6 6-6",
+  check: "M5 12l5 5 9-11",
+  x: "M6 6l12 12M18 6L6 18",
+  chevron: "M9 6l6 6-6 6",
+};
+
+/* ----------------------------- mock data ----------------------------- */
+
+const MOCK_USER = { name: "Alex Rivera", email: "alex@example.com", type: "Personal" };
+const MOCK_PROMPT = `You are acting as Alex Rivera, a direct and confident communicator with a warm, approachable tone. Alex works in [industry] and is focused on thought leadership and building authentic client relationships.
+
+When writing on Alex's behalf: use clear, concise language — no jargon unless the audience expects it. Lead with the most important point. Keep a conversational but professional register.
+
+The goal for this specific task is [goal]. The audience is [audience]. Write as if Alex is speaking directly to them.`;
+
+const RECENTS = [
+  { title: "LinkedIn thought leadership post", cat: "Marketing", date: "2 days ago" },
+  { title: "Client email follow-up", cat: "Client Emails", date: "4 days ago" },
+  { title: "Brand voice guide intro", cat: "Marketing", date: "1 week ago" },
+];
+
+const Q_PERSONAL = [
+  { q: "How would you describe your communication style?", type: "text", ph: "e.g. direct, warm, detailed, casual" },
+  { q: "What topics or industries do you work in?", type: "text", ph: "e.g. SaaS, coaching, design" },
+  { q: "How do you prefer to give direction — brief or thorough?", type: "toggle", opts: ["Brief", "Thorough"] },
+  { q: "What are your primary goals when using AI?", type: "text", ph: "e.g. save time, sound consistent" },
+  { q: "What tone do you naturally write or speak in?", type: "text", ph: "e.g. confident but friendly" },
+  { q: "What should AI never sound like when representing you?", type: "text", ph: "e.g. robotic, salesy, overhyped" },
+];
+const Q_BUSINESS = [
+  { q: "What does your business do and who does it serve?", type: "text", ph: "e.g. analytics for SMBs" },
+  { q: "How would you describe your brand voice and tone?", type: "text", ph: "e.g. smart, approachable" },
+  { q: "What are your core values as a business?", type: "text", ph: "e.g. clarity, trust, speed" },
+  { q: "Who is your primary target audience?", type: "text", ph: "e.g. marketing leaders" },
+  { q: "What products or services do you offer?", type: "text", ph: "e.g. dashboards, consulting" },
+  { q: "What messaging style do you use?", type: "select", opts: ["Educational", "Promotional", "Conversational", "Authoritative"] },
+];
+const ADAPTIVE_MOCK = [
+  "You mentioned a direct style — are there contexts where you shift that?",
+  "What does success look like for your primary goal?",
+  "Which AI tools do you currently use most often?",
+  "What's the biggest frustration you have with AI output right now?",
+  "Is there a person or brand whose communication style you admire?",
+];
+
+const CREATE_FLOW = [
+  { core: "What is the idea or project you're working on?", area: true,
+    a: "What format or medium is this for?",
+    b: "Is this a new idea or an extension of something existing?" },
+  { core: "What is the goal or outcome you want to achieve?", area: true,
+    a: "What does success look like for this specific piece?",
+    b: "Are there any constraints — length, tone, platform limits?" },
+  { core: "Who is the audience for this output?", area: false,
+    a: "What does this audience already know about this topic?",
+    b: "What do you want them to feel or do after reading this?" },
+];
+
+/* ----------------------------- AI: config, profile, calls ----------------------------- */
+/* Prototype-only: the Claude API key is read from THIS browser's local storage.
+   In the real build (V2) the key lives on the server (Supabase Edge Functions),
+   never inside the app. Don't share this file with your key saved in it. */
+
+const AI = {
+  endpoint: "https://api.anthropic.com/v1/messages",
+  version: "2023-06-01",
+  model_fast: "claude-haiku-4-5-20251001", // quick: adaptive follow-up questions
+  model_smart: "claude-sonnet-4-6",        // higher quality: the master prompt
+};
+const LS_KEY = "kontext_claude_key";
+
+function loadKey() { try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; } }
+function saveKey(k) { try { k ? localStorage.setItem(LS_KEY, k) : localStorage.removeItem(LS_KEY); } catch (e) {} }
+
+// The demo identity behind every prompt (mock profile for the prototype).
+const MOCK_PROFILE = {
+  name: "Alex Rivera",
+  type: "Personal",
+  voice: "Direct, confident, warm",
+  style: "Concise with context when needed",
+  goals: "Thought leadership and client communication",
+  details: [
+    ["Communication style", "Direct, warm, gets to the point"],
+    ["Topics / industries", "SaaS, marketing, founder content"],
+    ["Direction preference", "Brief"],
+    ["Goals with AI", "Sound consistent and save time"],
+    ["Natural tone", "Confident but friendly"],
+    ["Never sound like", "Robotic, salesy, overhyped"],
+  ],
+};
+function profileText(p) {
+  const lines = p.details.map(([k, v]) => `- ${k}: ${v}`).join("\n");
+  return `Name: ${p.name}\nAccount type: ${p.type}\nVoice: ${p.voice}\nStyle: ${p.style}\nGoals: ${p.goals}\nProfile answers:\n${lines}`;
+}
+
+// One small wrapper around the Claude API (browser-direct — prototype only).
+async function callClaude(apiKey, { system, user, model, max_tokens = 1024 }) {
+  const res = await fetch(AI.endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": AI.version,
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({ model, max_tokens, system, messages: [{ role: "user", content: user }] }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json())?.error?.message || ""; } catch (e) {}
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+  const data = await res.json();
+  return ((data.content && data.content[0] && data.content[0].text) || "").trim();
+}
+
+// Generate exactly two adaptive follow-up questions for one core question.
+async function genFollowups(apiKey, coreQ, answer) {
+  const system = "You are KonText, an engine that personalizes AI for a specific person. Given their identity profile, one core project question, and their answer, write exactly two short, specific follow-up questions that dig deeper so the final output is sharper. Each question is one sentence. Return ONLY a JSON array of two strings — no other text, no markdown.";
+  const user = `${profileText(MOCK_PROFILE)}\n\nCore question: ${coreQ}\nTheir answer: ${answer}\n\nReturn two follow-up questions as a JSON array.`;
+  const raw = await callClaude(apiKey, { system, user, model: AI.model_fast, max_tokens: 300 });
+  let arr;
+  try { arr = JSON.parse(raw); }
+  catch (e) { const m = raw.match(/\[[\s\S]*\]/); arr = m ? JSON.parse(m[0]) : null; }
+  if (!Array.isArray(arr) || arr.length < 2) throw new Error("Could not read the follow-up questions");
+  return [String(arr[0]), String(arr[1])];
+}
+
+// Build the final master prompt from all 9 answers.
+async function genMasterPrompt(apiKey, qa) {
+  const system = "You are KonText. Turn a person's identity profile plus their project answers into a single clean 'master prompt' they can paste into ChatGPT, Claude, or Gemini. Write it as direct instructions to an AI in second person (e.g. \"You are acting as...\"). Capture their voice, style, and goals, then the specific project, goal, and audience. Output ONLY the master prompt — no preamble, no explanation, no markdown headings. Keep it tight: 2 to 4 short paragraphs.";
+  const body = qa.map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n");
+  const user = `${profileText(MOCK_PROFILE)}\n\nProject answers:\n${body}`;
+  return callClaude(apiKey, { system, user, model: AI.model_smart, max_tokens: 700 });
+}
+
+/* ============================================================ APP */
+
+function App() {
+  const [screen, setScreen] = useState("landing");
+  const [accountType, setAccountType] = useState("Personal");
+  const [apiKey, setApiKeyState] = useState(loadKey());
+  const setApiKey = (k) => { saveKey(k); setApiKeyState(k); };
+
+  // vault state shared between Vaults + create flow
+  const [categories, setCategories] = useState(["Marketing", "Client Emails", "Social Media", "Internal Comms"]);
+  const [folders, setFolders] = useState({
+    "Marketing": [
+      { name: "LinkedIn thought leadership post", date: "2 days ago", text: MOCK_PROMPT },
+      { name: "Brand voice guide intro", date: "1 week ago", text: MOCK_PROMPT },
+    ],
+    "Client Emails": [{ name: "Client email follow-up", date: "4 days ago", text: MOCK_PROMPT }],
+    "Social Media": [],
+    "Internal Comms": [],
+  });
+
+  const go = (s) => { setScreen(s); window.scrollTo(0, 0); };
+
+  const ctx = { screen, go, accountType, setAccountType, categories, setCategories, folders, setFolders, apiKey, setApiKey };
+
+  // screens with the app chrome (sidebar)
+  const appScreens = ["home", "create", "vaults", "profile", "settings"];
+  const inApp = appScreens.includes(screen);
+
+  let view;
+  if (screen === "landing") view = <Landing go={go} />;
+  else if (screen === "signup") view = <Signup go={go} />;
+  else if (screen === "login") view = <Login go={go} />;
+  else if (screen === "accountType") view = <AccountType {...ctx} />;
+  else if (screen === "wizard") view = <Wizard {...ctx} />;
+  else if (inApp) view = <Shell {...ctx} />;
+
+  return view;
+}
+
+/* ----------------------------- 1. Landing ----------------------------- */
+
+function Landing({ go }) {
+  const Step = ({ n, title, body }) => (
+    <Card className="p-6 flex-1">
+      <div className="label text-brand mb-3">Step {n}</div>
+      <div className="text-base font-medium mb-1.5">{title}</div>
+      <p className="text-sm text-muted leading-relaxed">{body}</p>
+    </Card>
+  );
+  const Col = ({ title, items }) => (
+    <Card className="p-7 flex-1">
+      <div className="text-lg font-medium mb-4">{title}</div>
+      <ul className="space-y-2.5">
+        {items.map((i) => (
+          <li key={i} className="flex items-center gap-2.5 text-sm text-muted">
+            <Icon d={icons.check} className="h-4 w-4 text-brand" /> {i}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+  return (
+    <div className="min-h-full">
+      <header className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
+        <Logo />
+        <div className="flex items-center gap-2">
+          <Btn variant="ghost" onClick={() => go("login")}>Log in</Btn>
+          <Btn onClick={() => go("signup")}>Get Started</Btn>
+        </div>
+      </header>
+
+      <section className="mx-auto max-w-3xl px-6 pt-12 pb-16 text-center">
+        <h1 className="text-4xl sm:text-5xl font-medium leading-tight tracking-tight">
+          KonText brings your vision to life.
+        </h1>
+        <p className="mt-5 text-lg text-muted leading-relaxed">
+          AI assist, design powered by you. We use adaptive questioning to understand you or your brand, then turn that context into AI-ready direction.
+        </p>
+        <div className="mt-8 flex justify-center gap-3">
+          <Btn onClick={() => go("signup")} className="px-6 py-3">Get Started</Btn>
+          <Btn variant="secondary" onClick={() => go("login")} className="px-6 py-3">Learn More</Btn>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-5xl px-6 pb-16">
+        <div className="text-center label text-muted mb-6">How it works</div>
+        <div className="flex flex-col sm:flex-row gap-4">
+          <Step n="1" title="Build your identity" body="A short adaptive onboarding wizard learns your voice, style, and goals." />
+          <Step n="2" title="Create master prompts" body="Answer a few project questions. KonText writes a clean, ready prompt." />
+          <Step n="3" title="Use it anywhere" body="Paste into ChatGPT, Claude, or Gemini. One identity, every tool." />
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-5xl px-6 pb-16">
+        <div className="text-center label text-muted mb-6">Who it's for</div>
+        <div className="flex flex-col sm:flex-row gap-4">
+          <Col title="People" items={["Voice", "Style", "How you think", "How you give direction", "Preferences", "Goals"]} />
+          <Col title="Businesses" items={["Mission & Vision", "Brand Voice & Tone", "Values", "Products / Services", "Target Audience", "Messaging Style"]} />
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-3xl px-6 pb-20 text-center">
+        <h2 className="text-2xl font-medium">The more you use it, the more it sounds like you.</h2>
+        <p className="mt-3 text-muted leading-relaxed">
+          Every answer, project, and prompt becomes part of your living memory. KonText builds a richer picture of you with every session — so outputs sound like you from the first try.
+        </p>
+      </section>
+
+      <section className="mx-auto max-w-3xl px-6 pb-20 text-center">
+        <div className="label text-brand mb-4">Our mission</div>
+        <p className="text-2xl sm:text-3xl font-medium leading-snug tracking-tight">
+          This one life. <span className="text-brand">KonText brings your vision to life.</span> AI assist, design powered by you.
+        </p>
+      </section>
+
+      <section className="bg-white border-t border-line">
+        <div className="mx-auto max-w-3xl px-6 py-16 text-center">
+          <h2 className="text-2xl font-medium">Let's build your vision.</h2>
+          <div className="mt-6"><Btn onClick={() => go("signup")} className="px-6 py-3">Get Started</Btn></div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ----------------------------- 2/3. Auth ----------------------------- */
+
+function AuthWrap({ children }) {
+  return (
+    <div className="min-h-full flex items-center justify-center px-6 py-12">
+      <Card className="w-full max-w-sm p-8 fade">{children}</Card>
+    </div>
+  );
+}
+
+function Signup({ go }) {
+  return (
+    <AuthWrap>
+      <div className="text-center mb-6"><Logo /></div>
+      <h1 className="text-xl font-medium text-center mb-6">Create your account</h1>
+      <div className="space-y-4">
+        <Field label="Full name" placeholder="Alex Rivera" />
+        <Field label="Email address" placeholder="you@example.com" />
+        <Field label="Password" type="password" placeholder="••••••••" />
+        <Field label="Confirm password" type="password" placeholder="••••••••" />
+        <Btn className="w-full" onClick={() => go("accountType")}>Create Account</Btn>
+      </div>
+      <p className="mt-5 text-center text-sm text-muted">
+        Already have an account? <button className="text-brand font-medium" onClick={() => go("login")}>Log in</button>
+      </p>
+    </AuthWrap>
+  );
+}
+
+function Login({ go }) {
+  return (
+    <AuthWrap>
+      <div className="text-center mb-6"><Logo /></div>
+      <h1 className="text-xl font-medium text-center mb-6">Welcome back</h1>
+      <div className="space-y-4">
+        <Field label="Email address" placeholder="you@example.com" />
+        <Field label="Password" type="password" placeholder="••••••••" />
+        <Btn className="w-full" onClick={() => go("home")}>Log In</Btn>
+      </div>
+      <p className="mt-5 text-center text-sm text-muted">
+        Don't have an account? <button className="text-brand font-medium" onClick={() => go("signup")}>Sign up</button>
+      </p>
+    </AuthWrap>
+  );
+}
+
+/* ----------------------------- 4. Account type ----------------------------- */
+
+function AccountType({ go, accountType, setAccountType }) {
+  const [sel, setSel] = useState(null);
+  const pick = (t) => { setSel(t); setAccountType(t); };
+  const Choice = ({ t, emoji, title, sub, bullets }) => (
+    <button
+      onClick={() => pick(t)}
+      className={`flex-1 rounded-xl border bg-white p-7 text-left transition-colors ${sel === t ? "border-brand ring-2 ring-brand/30" : "border-line hover:border-brand/50"}`}
+    >
+      <div className="text-3xl mb-3">{emoji}</div>
+      <div className="text-lg font-medium">{title}</div>
+      <div className="text-sm text-muted mt-1">{sub}</div>
+      <div className="mt-4 text-xs text-muted">{bullets}</div>
+    </button>
+  );
+  return (
+    <div className="min-h-full flex flex-col items-center justify-center px-6 py-12">
+      <div className="w-full max-w-2xl text-center mb-8 fade">
+        <h1 className="text-2xl font-medium">Who is this account for?</h1>
+        <p className="text-muted mt-2">This shapes everything — your questions, your profile, your prompts.</p>
+      </div>
+      <div className="w-full max-w-2xl flex flex-col sm:flex-row gap-4">
+        <Choice t="Personal" emoji="🧑" title="Personal" sub="I want AI to sound like me" bullets="Voice · Style · Goals · Thinking" />
+        <Choice t="Business" emoji="🏢" title="Business" sub="I want AI to represent my brand" bullets="Mission · Tone · Values · Audience" />
+      </div>
+      <div className="mt-8">
+        <Btn disabled={!sel} onClick={() => go("wizard")} className="px-8">Continue</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 5. Wizard ----------------------------- */
+
+function Wizard({ go, accountType }) {
+  const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
+  const [answers, setAnswers] = useState({});
+  const [layer2, setLayer2] = useState(false);
+
+  const total = fixed.length + ADAPTIVE_MOCK.length;
+  const done = Object.values(answers).filter((v) => v && String(v).trim()).length;
+  const pct = Math.round((done / total) * 100);
+
+  const set = (k, v) => setAnswers((a) => ({ ...a, [k]: v }));
+
+  return (
+    <div className="min-h-full">
+      <div className="sticky top-0 z-10 bg-tint/90 backdrop-blur border-b border-line">
+        <div className="mx-auto max-w-2xl px-6 py-3">
+          <div className="flex items-center justify-between mb-2">
+            <Logo size="text-lg" />
+            <Badge>{accountType}</Badge>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-line overflow-hidden">
+            <div className="h-full bg-brand transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto max-w-2xl px-6 py-8">
+        <h1 className="text-2xl font-medium">Let's build your KonText Profile</h1>
+        <p className="text-muted mt-1.5">Answer honestly — this becomes the identity behind every prompt.</p>
+
+        <div className="mt-8 space-y-5">
+          {fixed.map((f, i) => (
+            <Card key={i} className="p-5 fade">
+              <div className="text-sm font-medium mb-3">{i + 1}. {f.q}</div>
+              {f.type === "toggle" ? (
+                <div className="flex gap-2">
+                  {f.opts.map((o) => (
+                    <button key={o} onClick={() => set(i, o)}
+                      className={`flex-1 rounded-lg border px-4 py-2.5 text-sm ${answers[i] === o ? "border-brand bg-tint text-brand font-medium" : "border-line text-muted"}`}>
+                      {o}
+                    </button>
+                  ))}
+                </div>
+              ) : f.type === "select" ? (
+                <select value={answers[i] || ""} onChange={(e) => set(i, e.target.value)}
+                  className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand">
+                  <option value="">Choose one…</option>
+                  {f.opts.map((o) => <option key={o}>{o}</option>)}
+                </select>
+              ) : (
+                <Field placeholder={f.ph} value={answers[i] || ""} onChange={(e) => set(i, e.target.value)} />
+              )}
+            </Card>
+          ))}
+        </div>
+
+        {!layer2 ? (
+          <div className="mt-6">
+            <Btn className="w-full py-3" onClick={() => { setLayer2(true); }}>Continue to next step</Btn>
+          </div>
+        ) : (
+          <div className="mt-10 fade">
+            <div className="label text-brand mb-1">Layer 2</div>
+            <h2 className="text-lg font-medium mb-1">Based on what you shared, a few more questions</h2>
+            <p className="text-sm text-muted mb-5">In step 2 these adapt to your real answers. For now they're samples.</p>
+            <div className="space-y-5">
+              {ADAPTIVE_MOCK.map((q, i) => (
+                <Card key={i} className="p-5 fade">
+                  <div className="text-sm font-medium mb-3">{q}</div>
+                  <Field placeholder="Type your answer…" value={answers["a" + i] || ""} onChange={(e) => set("a" + i, e.target.value)} />
+                </Card>
+              ))}
+            </div>
+            <div className="mt-6">
+              <Btn className="w-full py-3" onClick={() => go("home")}>Complete my profile</Btn>
+            </div>
+          </div>
+        )}
+        <div className="h-10" />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- App Shell (sidebar) ----------------------------- */
+
+function Shell(props) {
+  const { screen, go } = props;
+  const nav = [
+    { key: "home", label: "Home", icon: icons.home },
+    { key: "vaults", label: "Vaults", icon: icons.vault },
+    { key: "profile", label: "Profile", icon: icons.profile },
+    { key: "settings", label: "Settings", icon: icons.settings },
+  ];
+  const active = screen === "create" ? "home" : screen;
+
+  let main;
+  if (screen === "home") main = <Home {...props} />;
+  else if (screen === "create") main = <Create {...props} />;
+  else if (screen === "vaults") main = <Vaults {...props} />;
+  else if (screen === "profile") main = <Profile {...props} />;
+  else if (screen === "settings") main = <Settings {...props} />;
+
+  return (
+    <div className="min-h-full md:flex">
+      {/* desktop sidebar */}
+      <aside className="hidden md:flex w-60 shrink-0 flex-col border-r border-line bg-white px-4 py-5 sticky top-0 h-screen">
+        <div className="px-2 mb-8"><Logo /></div>
+        <nav className="space-y-1">
+          {nav.map((n) => (
+            <button key={n.key} onClick={() => go(n.key)}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors ${active === n.key ? "bg-brand text-white" : "text-muted hover:bg-tint hover:text-ink"}`}>
+              <Icon d={n.icon} className="h-5 w-5" /> {n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="mt-auto flex items-center gap-3 border-t border-line pt-4">
+          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-tint text-sm font-medium text-brand">AR</div>
+          <div className="leading-tight">
+            <div className="text-sm font-medium">{MOCK_USER.name}</div>
+            <div className="text-xs text-muted">{MOCK_USER.type}</div>
+          </div>
+        </div>
+      </aside>
+
+      {/* main */}
+      <main className="flex-1 pb-24 md:pb-0 min-w-0">{main}</main>
+
+      {/* mobile bottom bar */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 flex border-t border-line bg-white">
+        {nav.map((n) => (
+          <button key={n.key} onClick={() => go(n.key)}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-2.5 text-[10px] ${active === n.key ? "text-brand" : "text-muted"}`}>
+            <Icon d={n.icon} className="h-5 w-5" /> {n.label}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+function PageHead({ title, sub, right }) {
+  return (
+    <div className="flex items-end justify-between gap-4 mb-6">
+      <div>
+        <h1 className="text-2xl font-medium">{title}</h1>
+        {sub && <p className="text-muted mt-1">{sub}</p>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+/* ----------------------------- 6. Home ----------------------------- */
+
+function Home({ go }) {
+  const [tut, setTut] = useState(true);
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-8">
+      {tut && (
+        <Card className="p-5 mb-6 bg-tint border-line fade">
+          <div className="flex items-start justify-between">
+            <div className="font-medium">Welcome to KonText 👋 Here's how to get started</div>
+            <button className="text-xs text-muted hover:text-ink" onClick={() => setTut(false)}>Skip tutorial</button>
+          </div>
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[["Your Profile", "Set the identity behind every prompt"], ["Create Master Prompts", "Answer a few questions, get a clean prompt"], ["Save to Vaults", "Organize prompts into folders you control"]].map(([t, b]) => (
+              <div key={t} className="rounded-lg bg-white border border-line p-3">
+                <div className="text-sm font-medium">{t}</div>
+                <div className="text-xs text-muted mt-1">{b}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 text-right"><Btn onClick={() => setTut(false)}>Got it</Btn></div>
+        </Card>
+      )}
+
+      <Card className="p-8 text-center mb-8">
+        <h2 className="text-xl font-medium">What do you want to create today?</h2>
+        <p className="text-muted mt-1.5">We'll use your KonText profile to shape the output.</p>
+        <Btn className="mt-5 w-full py-3.5 text-base" onClick={() => go("create")}>
+          <Icon d={icons.plus} className="h-5 w-5" /> Create Master Prompt
+        </Btn>
+      </Card>
+
+      <h3 className="text-sm font-medium mb-3">Recent prompts</h3>
+      <div className="space-y-3">
+        {RECENTS.map((r) => (
+          <Card key={r.title} className="p-4 flex items-center justify-between hover:border-brand/40 transition-colors">
+            <div>
+              <div className="text-sm font-medium">{r.title}</div>
+              <div className="text-xs text-muted mt-0.5">{r.cat} · {r.date}</div>
+            </div>
+            <button className="text-muted hover:text-brand p-2" title="Copy"><Icon d={icons.copy} /></button>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 7. Create flow ----------------------------- */
+
+function Create({ go, categories, setCategories, folders, setFolders, apiKey }) {
+  // step index 0..8 across 9 questions, then "output"
+  const [stage, setStage] = useState(0);        // 0..8 questions, 9 = output
+  const [answers, setAnswers] = useState({});
+  const [followups, setFollowups] = useState({}); // { groupIndex: [q1, q2] } — AI-generated when live
+  const [master, setMaster] = useState("");       // the generated master prompt
+  const [busy, setBusy] = useState(false);         // calling Claude (followups or master)
+  const [aiError, setAiError] = useState("");
+  const [showSave, setShowSave] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const live = !!apiKey;
+
+  // build linear list of 9 questions; adaptive text is AI-generated when live, sample otherwise
+  const flat = [];
+  CREATE_FLOW.forEach((g, gi) => {
+    flat.push({ key: `c${gi}`, q: g.core, area: g.area, kind: "core", group: gi });
+    flat.push({ key: `a${gi}`, q: (followups[gi] && followups[gi][0]) || g.a, area: false, kind: "adaptive", group: gi });
+    flat.push({ key: `b${gi}`, q: (followups[gi] && followups[gi][1]) || g.b, area: false, kind: "adaptive", group: gi });
+  });
+
+  const isOutput = stage >= flat.length;
+  const cur = flat[stage];
+  const val = cur ? (answers[cur.key] || "") : "";
+  const set = (v) => setAnswers((a) => ({ ...a, [cur.key]: v }));
+  const allQA = () => flat.map((f) => [f.q, answers[f.key] || ""]);
+  const promptText = master || MOCK_PROMPT;
+
+  // After answering a core question, generate its two follow-ups (live only, once).
+  const advance = async () => {
+    setAiError("");
+    if (live && cur.kind === "core" && !followups[cur.group]) {
+      setBusy(true);
+      try {
+        const fups = await genFollowups(apiKey, cur.q, val);
+        setFollowups((f) => ({ ...f, [cur.group]: fups }));
+      } catch (e) {
+        setAiError("Couldn't reach Claude — using a sample follow-up. " + e.message);
+      }
+      setBusy(false);
+    }
+    setStage((s) => s + 1);
+  };
+
+  const generate = async () => {
+    setStage(flat.length); // show output screen
+    if (!live) { setMaster(MOCK_PROMPT); return; }
+    setBusy(true); setAiError("");
+    try {
+      setMaster(await genMasterPrompt(apiKey, allQA()));
+    } catch (e) {
+      setMaster(MOCK_PROMPT);
+      setAiError("Couldn't reach Claude — showing a sample prompt. " + e.message);
+    }
+    setBusy(false);
+  };
+
+  if (isOutput) {
+    return (
+      <div className="mx-auto max-w-2xl px-6 py-8">
+        <button className="flex items-center gap-1 text-sm text-muted hover:text-ink mb-4" onClick={() => setStage(flat.length - 1)}>
+          <Icon d={icons.back} className="h-4 w-4" /> Back to questions
+        </button>
+        <h1 className="text-2xl font-medium mb-1">Your Master Prompt</h1>
+        <p className="text-muted mb-5">Built from your profile and your answers. Ready to paste anywhere.</p>
+
+        {busy ? (
+          <Card className="p-10 text-center text-muted fade">Writing your master prompt…</Card>
+        ) : (
+          <Card className="p-6 whitespace-pre-wrap text-sm leading-relaxed text-ink">{promptText}</Card>
+        )}
+        {aiError && <p className="mt-3 text-xs text-danger">{aiError}</p>}
+
+        {!busy && (
+          <div className="mt-5 flex gap-3">
+            <Btn onClick={() => { try { navigator.clipboard && navigator.clipboard.writeText(promptText); } catch (e) {} setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
+              <Icon d={copied ? icons.check : icons.copy} className="h-4 w-4" /> {copied ? "Copied" : "Copy to clipboard"}
+            </Btn>
+            <Btn variant="secondary" onClick={() => setShowSave(true)}>Save to Vault</Btn>
+          </div>
+        )}
+
+        {showSave && (
+          <SaveModal
+            categories={categories} setCategories={setCategories}
+            onClose={() => setShowSave(false)}
+            onSave={(name, cat) => {
+              setFolders((f) => ({ ...f, [cat]: [{ name, date: "just now", text: promptText }, ...(f[cat] || [])] }));
+              setShowSave(false);
+              go("vaults");
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-2xl px-6 py-8">
+      <PageHead title="Tell us about your project" sub="We'll use your KonText profile + your answers to build your master prompt." />
+
+      <div className="mb-5">
+        {live ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-tint px-3 py-1 text-xs font-medium text-brand">
+            <span className="h-1.5 w-1.5 rounded-full bg-ok" /> Live AI — follow-ups adapt to your answers
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-2 text-xs text-muted">
+            Sample mode — follow-ups are examples.
+            <button className="text-brand font-medium" onClick={() => go("settings")}>Connect Claude</button>
+          </span>
+        )}
+      </div>
+
+      <div className="mb-6">
+        <div className="flex justify-between text-xs text-muted mb-2">
+          <span>Question {stage + 1} of {flat.length}</span>
+          <span className="capitalize">{cur.kind === "core" ? "Core question" : "Follow-up"}</span>
+        </div>
+        <div className="h-1.5 w-full rounded-full bg-line overflow-hidden">
+          <div className="h-full bg-brand transition-all" style={{ width: `${((stage) / flat.length) * 100}%` }} />
+        </div>
+      </div>
+
+      <Card className="p-6 fade" key={cur.key}>
+        <div className="text-base font-medium mb-4">{cur.q}</div>
+        {cur.area ? (
+          <TextArea rows={4} placeholder="Type your answer…" value={val} onChange={(e) => set(e.target.value)} />
+        ) : (
+          <Field placeholder="Type your answer…" value={val} onChange={(e) => set(e.target.value)} />
+        )}
+      </Card>
+      {aiError && <p className="mt-3 text-xs text-danger">{aiError}</p>}
+
+      <div className="mt-6 flex justify-between">
+        <Btn variant="ghost" disabled={stage === 0 || busy} onClick={() => setStage((s) => s - 1)}>Back</Btn>
+        {stage < flat.length - 1 ? (
+          <Btn disabled={!val.trim() || busy} onClick={advance}>{busy ? "Thinking…" : "Next"}</Btn>
+        ) : (
+          <Btn disabled={!val.trim() || busy} onClick={generate}>{busy ? "Thinking…" : "Generate my master prompt"}</Btn>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SaveModal({ categories, setCategories, onClose, onSave }) {
+  const [name, setName] = useState("");
+  const [cat, setCat] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newCat, setNewCat] = useState("");
+
+  const finalCat = creating ? newCat.trim() : cat;
+  const canSave = name.trim() && finalCat;
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/30 px-6" onClick={onClose}>
+      <Card className="w-full max-w-sm p-6 fade" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-medium mb-4">Save your prompt</h2>
+        <div className="space-y-4">
+          <Field label="Prompt name" placeholder="e.g. Q2 launch email" value={name} onChange={(e) => setName(e.target.value)} />
+          {!creating ? (
+            <label className="block">
+              <span className="label text-muted block mb-1.5">Category</span>
+              <select value={cat} onChange={(e) => { if (e.target.value === "__new") { setCreating(true); } else setCat(e.target.value); }}
+                className="w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm outline-none focus:border-brand">
+                <option value="">Choose a category…</option>
+                {categories.map((c) => <option key={c}>{c}</option>)}
+                <option value="__new">+ Create new category</option>
+              </select>
+            </label>
+          ) : (
+            <Field label="New category" placeholder="Category name" value={newCat} onChange={(e) => setNewCat(e.target.value)} />
+          )}
+        </div>
+        <div className="mt-6 flex items-center justify-end gap-3">
+          <button className="text-sm text-muted hover:text-ink" onClick={onClose}>Cancel</button>
+          <Btn disabled={!canSave} onClick={() => {
+            if (creating && !categories.some((c) => c.toLowerCase() === finalCat.toLowerCase())) setCategories((cs) => [...cs, finalCat]);
+            onSave(name.trim(), finalCat);
+          }}>Save</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- 8. Vaults ----------------------------- */
+
+function Vaults({ categories, setCategories, folders, setFolders }) {
+  const [open, setOpen] = useState(null); // folder name
+  const [query, setQuery] = useState("");
+  const [newTag, setNewTag] = useState("");
+  const [dupe, setDupe] = useState(false);
+
+  const addTag = () => {
+    const v = newTag.trim();
+    if (!v) return;
+    if (v.length > 32) return;
+    if (categories.some((c) => c.toLowerCase() === v.toLowerCase())) { setDupe(true); return; }
+    setCategories((c) => [...c, v]);
+    setFolders((f) => ({ ...f, [v]: f[v] || [] }));
+    setNewTag(""); setDupe(false);
+  };
+  const delTag = (t) => {
+    setCategories((c) => c.filter((x) => x !== t));
+    setFolders((f) => { const n = { ...f }; delete n[t]; return n; });
+    if (open === t) setOpen(null);
+  };
+
+  if (open) return <FolderView name={open} folders={folders} setFolders={setFolders} onBack={() => setOpen(null)} />;
+
+  const folderNames = categories.filter((c) => !query || c.toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-8">
+      <PageHead title="My Vaults" right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Folder</Btn>} />
+
+      <div className="relative mb-6">
+        <Icon d={icons.search} className="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search your vaults..."
+          className="w-full rounded-lg border border-line bg-white pl-10 pr-3.5 py-2.5 text-sm outline-none focus:border-brand" />
+      </div>
+
+      {/* category manager */}
+      <Card className="p-5 mb-6">
+        <div className="label text-muted mb-3">My categories</div>
+        {categories.length === 0 ? (
+          <p className="text-sm text-muted mb-3">No categories yet — add one below</p>
+        ) : (
+          <div className="flex flex-wrap gap-2 mb-3">
+            {categories.map((t) => (
+              <span key={t} className="inline-flex items-center gap-1.5 rounded-full bg-tagbg px-3 py-1 text-xs font-medium text-tagink">
+                {t}
+                <button onClick={() => delTag(t)} className="hover:text-danger"><Icon d={icons.x} className="h-3 w-3" /></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            value={newTag}
+            maxLength={32}
+            onChange={(e) => { setNewTag(e.target.value); setDupe(false); }}
+            onKeyDown={(e) => { if (e.key === "Enter") addTag(); }}
+            placeholder="New category name..."
+            className={`flex-1 rounded-lg border bg-white px-3.5 py-2 text-sm outline-none ${dupe ? "border-danger ring-2 ring-danger/30" : "border-line focus:border-brand"}`}
+          />
+          <Btn onClick={addTag}>Add category</Btn>
+        </div>
+      </Card>
+
+      {/* folder grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {folderNames.map((name) => (
+          <button key={name} onClick={() => setOpen(name)}
+            className="rounded-xl border border-line bg-white p-5 text-left hover:border-brand/50 transition-colors">
+            <div className="flex items-center justify-between">
+              <Icon d={icons.folder} className="h-7 w-7 text-brand" />
+              <Icon d={icons.chevron} className="h-4 w-4 text-muted" />
+            </div>
+            <div className="mt-3 text-sm font-medium">{name}</div>
+            <div className="text-xs text-muted mt-0.5">{(folders[name] || []).length} prompts</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FolderView({ name, folders, setFolders, onBack }) {
+  const items = folders[name] || [];
+  const [editIdx, setEditIdx] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [confirmIdx, setConfirmIdx] = useState(null);
+  const [copiedIdx, setCopiedIdx] = useState(null);
+
+  const update = (idx, text) => setFolders((f) => ({ ...f, [name]: f[name].map((p, i) => i === idx ? { ...p, text } : p) }));
+  const remove = (idx) => setFolders((f) => ({ ...f, [name]: f[name].filter((_, i) => i !== idx) }));
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-8">
+      <button className="flex items-center gap-1 text-sm text-muted hover:text-ink mb-4" onClick={onBack}>
+        <Icon d={icons.back} className="h-4 w-4" /> My Vaults
+      </button>
+      <PageHead title={name} right={<Btn><Icon d={icons.plus} className="h-4 w-4" /> New Prompt</Btn>} />
+
+      {items.length === 0 ? (
+        <Card className="p-10 text-center text-muted">No prompts in this folder yet.</Card>
+      ) : (
+        <div className="space-y-3">
+          {items.map((p, idx) => (
+            <Card key={idx} className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{p.name}</div>
+                  <div className="text-xs text-muted mt-0.5">{p.date}</div>
+                  {editIdx !== idx && <div className="text-sm text-muted mt-2 truncate">{p.text.split("\n")[0]}</div>}
+                </div>
+                <div className="flex items-center gap-1 shrink-0 text-muted">
+                  <button title="Edit" className="p-1.5 hover:text-brand" onClick={() => { setEditIdx(idx); setDraft(p.text); }}><Icon d={icons.edit} className="h-4 w-4" /></button>
+                  <button title="Copy" className="p-1.5 hover:text-brand" onClick={() => { setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 1200); }}><Icon d={copiedIdx === idx ? icons.check : icons.copy} className="h-4 w-4" /></button>
+                  <button title="Share" className="p-1.5 hover:text-brand"><Icon d={icons.share} className="h-4 w-4" /></button>
+                  <button title="Export" className="p-1.5 hover:text-brand"><Icon d={icons.download} className="h-4 w-4" /></button>
+                  <button title="Delete" className="p-1.5 hover:text-danger" onClick={() => setConfirmIdx(idx)}><Icon d={icons.trash} className="h-4 w-4" /></button>
+                </div>
+              </div>
+
+              {editIdx === idx && (
+                <div className="mt-3 fade">
+                  <TextArea rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} />
+                  <div className="mt-3 flex gap-2">
+                    <Btn onClick={() => { update(idx, draft); setEditIdx(null); }}>Save changes</Btn>
+                    <Btn variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Btn>
+                  </div>
+                </div>
+              )}
+
+              {confirmIdx === idx && (
+                <div className="mt-3 rounded-lg bg-red-50 border border-danger/30 p-3 fade">
+                  <div className="text-sm text-ink">Are you sure? This cannot be undone.</div>
+                  <div className="mt-2 flex gap-2">
+                    <Btn variant="danger" onClick={() => { remove(idx); setConfirmIdx(null); }}>Confirm delete</Btn>
+                    <Btn variant="ghost" onClick={() => setConfirmIdx(null)}>Cancel</Btn>
+                  </div>
+                </div>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- 9. Profile ----------------------------- */
+
+function Profile({ accountType }) {
+  const traits = [
+    ["Voice", "Direct, confident, warm"],
+    ["Style", "Concise with context when needed"],
+    ["Goals", "Thought leadership and client communication"],
+  ];
+  const fixed = accountType === "Business" ? Q_BUSINESS : Q_PERSONAL;
+  const sample = [
+    "Direct, warm, gets to the point",
+    "SaaS, marketing, founder content",
+    "Brief",
+    "Sound consistent and save time",
+    "Confident but friendly",
+    "Robotic, salesy, overhyped",
+  ];
+  const [fields, setFields] = useState(fixed.map((f, i) => ({ label: f.q, value: sample[i] || "—" })));
+  const [editIdx, setEditIdx] = useState(null);
+  const [draft, setDraft] = useState("");
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-8">
+      <Card className="p-7 mb-8">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tint text-lg font-medium text-brand">AR</div>
+            <div>
+              <div className="text-lg font-medium">{MOCK_USER.name}</div>
+              <div className="text-sm text-muted">{MOCK_USER.email}</div>
+              <div className="mt-2"><Badge>{accountType}</Badge></div>
+            </div>
+          </div>
+          <Btn variant="secondary">Edit profile</Btn>
+        </div>
+        <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-line pt-5">
+          {traits.map(([k, v]) => (
+            <div key={k}>
+              <div className="label text-muted mb-1">{k}</div>
+              <div className="text-sm">{v}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <h2 className="text-lg font-medium">Your KonText Profile</h2>
+      <p className="text-sm text-muted mt-1 mb-5">These answers shape every master prompt KonText builds for you.</p>
+      <div className="space-y-3">
+        {fields.map((f, i) => (
+          <Card key={i} className="p-4">
+            <div className="label text-muted mb-1.5">{f.label}</div>
+            {editIdx === i ? (
+              <div className="fade">
+                <Field value={draft} onChange={(e) => setDraft(e.target.value)} />
+                <div className="mt-2 flex gap-2">
+                  <Btn onClick={() => { setFields((fs) => fs.map((x, j) => j === i ? { ...x, value: draft } : x)); setEditIdx(null); }}>Save</Btn>
+                  <Btn variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Btn>
+                </div>
+              </div>
+            ) : (
+              <button className="text-left w-full text-sm hover:text-brand" onClick={() => { setEditIdx(i); setDraft(f.value); }}>
+                {f.value}
+              </button>
+            )}
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 10. Settings ----------------------------- */
+
+function KeyEditor({ apiKey, setApiKey }) {
+  const [draft, setDraft] = useState(apiKey || "");
+  const [status, setStatus] = useState(""); // "", "testing", "ok", "fail"
+  const [msg, setMsg] = useState("");
+
+  const test = async () => {
+    setStatus("testing"); setMsg("");
+    try {
+      await callClaude(draft.trim(), { system: "Reply with the single word: ok", user: "ok", model: AI.model_fast, max_tokens: 5 });
+      setApiKey(draft.trim());
+      setStatus("ok"); setMsg("Working — you're connected.");
+    } catch (e) {
+      setStatus("fail"); setMsg((e.message || "Couldn't connect.") + " (Check the key and that your Console has credit.)");
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex gap-2 items-end">
+        <div className="flex-1"><Field label="Claude API key" type="password" placeholder="sk-ant-..." value={draft} onChange={(e) => { setDraft(e.target.value); setStatus(""); setMsg(""); }} /></div>
+        <Btn variant="secondary" disabled={!draft.trim()} onClick={() => { setApiKey(draft.trim()); setStatus("ok"); setMsg("Saved."); }}>Save</Btn>
+      </div>
+      <div className="mt-3 flex items-center gap-4">
+        <Btn variant="ghost" disabled={!draft.trim() || status === "testing"} onClick={test}>{status === "testing" ? "Testing…" : "Test connection"}</Btn>
+        {apiKey && <button className="text-xs text-danger" onClick={() => { setApiKey(""); setDraft(""); setStatus(""); setMsg("Disconnected."); }}>Remove key</button>}
+      </div>
+      {msg && <p className={`mt-2 text-xs ${status === "fail" ? "text-danger" : "text-ok"}`}>{msg}</p>}
+    </div>
+  );
+}
+
+function Settings({ go, apiKey, setApiKey }) {
+  const [emailNotif, setEmailNotif] = useState(true);
+  const [weekly, setWeekly] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  const Toggle = ({ on, onClick, label }) => (
+    <div className="flex items-center justify-between py-2">
+      <span className="text-sm">{label}</span>
+      <button onClick={onClick} className={`h-6 w-11 rounded-full transition-colors ${on ? "bg-brand" : "bg-line"}`}>
+        <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${on ? "translate-x-5" : "translate-x-0.5"}`} />
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="mx-auto max-w-2xl px-6 py-8">
+      <PageHead title="Settings" />
+
+      <Card className="p-6 mb-5">
+        <div className="label text-muted mb-3">AI connection</div>
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`h-2 w-2 rounded-full ${apiKey ? "bg-ok" : "bg-line"}`} />
+          <span className="text-sm font-medium">{apiKey ? "Connected to Claude" : "Not connected"}</span>
+        </div>
+        <p className="text-sm text-muted mb-4 leading-relaxed">
+          Paste your Claude API key to make the Create flow generate real adaptive questions and master prompts.
+          Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-brand">console.anthropic.com</a>.
+          The key stays in this browser only — don't share this file with your key saved in it.
+        </p>
+        <KeyEditor apiKey={apiKey} setApiKey={setApiKey} />
+      </Card>
+
+      <Card className="p-6 mb-5">
+        <div className="label text-muted mb-4">Account</div>
+        <div className="space-y-4">
+          <div className="flex gap-2 items-end">
+            <div className="flex-1"><Field label="Change email" defaultValue={MOCK_USER.email} /></div>
+            <Btn variant="secondary">Save</Btn>
+          </div>
+          <div className="flex gap-2 items-end">
+            <div className="flex-1"><Field label="Change password" type="password" placeholder="New password" /></div>
+            <Btn variant="secondary">Save</Btn>
+          </div>
+        </div>
+      </Card>
+
+      <Card className="p-6 mb-5">
+        <div className="label text-muted mb-3">Subscription</div>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium">Plan: Pro</div>
+            <div className="text-xs text-muted">Placeholder for V1</div>
+          </div>
+          <Btn variant="secondary" disabled>Manage billing</Btn>
+        </div>
+      </Card>
+
+      <Card className="p-6 mb-5">
+        <div className="label text-muted mb-2">Notifications</div>
+        <Toggle on={emailNotif} onClick={() => setEmailNotif((v) => !v)} label="Email notifications" />
+        <Toggle on={weekly} onClick={() => setWeekly((v) => !v)} label="Weekly prompt summaries" />
+      </Card>
+
+      <Card className="p-6 mb-5 border-danger/40">
+        <div className="label text-danger mb-3">Danger zone</div>
+        {!confirmDel ? (
+          <Btn variant="danger" onClick={() => setConfirmDel(true)}>Delete account</Btn>
+        ) : (
+          <div className="fade">
+            <div className="text-sm mb-3">This permanently deletes your account and all vaults. This cannot be undone.</div>
+            <div className="flex gap-2">
+              <Btn variant="danger" onClick={() => setConfirmDel(false)}>Yes, delete</Btn>
+              <Btn variant="ghost" onClick={() => setConfirmDel(false)}>Cancel</Btn>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Btn variant="secondary" className="w-full" onClick={() => go("landing")}>Log out</Btn>
+    </div>
+  );
+}
+
+/* ----------------------------- mount ----------------------------- */
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

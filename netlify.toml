@@ -1,0 +1,5 @@
+# Netlify config for the KonText prototype (static site).
+# The site is a single index.html with no build step.
+[build]
+  publish = "."
+  command = ""
